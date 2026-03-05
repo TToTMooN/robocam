@@ -22,10 +22,9 @@ all = ["pyrealsense2", "pyzed", "opencv-contrib-python", "Pillow"]
 [tool.flit.module]
 name = "robocam"
 
-# Pre-bundled pyzed wheel for CPython 3.11 + Linux x86_64.
-# Other platforms: download from https://www.stereolabs.com/developers/release
-[tool.uv.sources]
-pyzed = { path = "vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+# pyzed is not on PyPI. When using robocam[zed], provide the pyzed wheel
+# via [tool.uv.sources] in your project's pyproject.toml. See README.md.
+# For convenience, a vendored wheel is included in vendor/ for local installs.
 
 [tool.ruff]
 line-length = 119

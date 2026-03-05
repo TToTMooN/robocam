@@ -16,8 +16,22 @@ pip install robocam[zed]          # Stereolabs ZED — requires ZED SDK (see bel
 pip install robocam[opencv]       # Generic V4L2 / webcam
 pip install robocam[all]          # Everything
 
-# Development (editable, from monorepo)
-pip install -e packages/robocam[all]
+# Development (editable)
+pip install -e .[all]
+```
+
+### pyzed (not on PyPI)
+
+`pyzed` is not published on PyPI. If you use `uv`, add it to your project's `[tool.uv.sources]`:
+
+```toml
+# Option 1: vendored wheel (included in vendor/ for py311+linux)
+[tool.uv.sources]
+pyzed = { path = "vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+
+# Option 2: download from Stereolabs
+# Run: python /usr/local/zed/get_python_api.py
+# Then: pyzed = { path = "/path/to/downloaded/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 ```
 
 ### System dependencies by driver
