@@ -22,16 +22,11 @@ pip install -e .[all]
 
 ### pyzed (not on PyPI)
 
-`pyzed` is not published on PyPI. If you use `uv`, add it to your project's `[tool.uv.sources]`:
+`pyzed` is not published on PyPI (there's a fake unrelated `pyzed` on PyPI). The real wheel is hosted on the Stereolabs CDN and configured automatically in `[tool.uv.sources]`. If you consume robocam as a git dependency, add this to your project's `pyproject.toml`:
 
 ```toml
-# Option 1: vendored wheel (included in vendor/ for py311+linux)
 [tool.uv.sources]
-pyzed = { path = "vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
-
-# Option 2: download from Stereolabs
-# Run: python /usr/local/zed/get_python_api.py
-# Then: pyzed = { path = "/path/to/downloaded/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 ```
 
 ### System dependencies by driver

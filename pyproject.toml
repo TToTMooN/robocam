@@ -23,11 +23,11 @@ all = ["pyrealsense2", "pyzed", "opencv-contrib-python", "Pillow"]
 name = "robocam"
 
 # pyzed is not on PyPI — there's a fake pyzed on PyPI that is unrelated.
-# This source ensures the real Stereolabs wheel is used for local development.
+# This source points to the real Stereolabs wheel on their CDN.
 # When consuming robocam as a git dependency, this source is ignored by uv;
 # the downstream project must configure pyzed in its own [tool.uv.sources].
 [tool.uv.sources]
-pyzed = { path = "vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 
 [tool.ruff]
 line-length = 119
