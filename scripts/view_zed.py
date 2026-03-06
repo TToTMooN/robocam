@@ -104,7 +104,7 @@ def main() -> None:
                 right_bgr = cv2.cvtColor(data.images["right_rgb"], cv2.COLOR_RGB2BGR)
                 panels.append(right_bgr)
 
-            if args.depth and hasattr(data, "depth_data") and data.depth_data is not None:
+            if args.depth and data.depth_data is not None:
                 depth_norm = cv2.normalize(data.depth_data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                 depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_TURBO)
                 panels.append(depth_color)

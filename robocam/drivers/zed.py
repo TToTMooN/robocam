@@ -11,7 +11,7 @@ from typing import Dict
 import numpy as np
 from loguru import logger
 
-from robocam.camera import CameraData
+from robocam.camera import CameraData, PointCloudData
 
 try:
     from pyzed import sl
@@ -168,7 +168,7 @@ class ZedCamera:
 
             if self.enable_depth:
                 self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
-                result.depth_data = np.ascontiguousarray(self.depth_map.get_data())  # type: ignore[attr-defined]
+                result.depth_data = np.ascontiguousarray(self.depth_map.get_data())
 
             return result
 
@@ -185,6 +185,25 @@ class ZedCamera:
             return self.depth_map.get_data()
         logger.warning("{}: Failed to grab depth", self)
         return np.zeros((0, 0))
+
+    def read_xyzrgba(self) -> np.ndarray:
+        """Read XYZRGBA point cloud measure (requires ``enable_depth=True``).
+
+        Returns
+        -------
+        np.ndarray
+            ``(H, W, 4)`` float32 array where channels 0-2 are XYZ in metres
+            and channel 3 is packed RGBA.  Pass to :func:`decode_xyzrgba` to
+            get usable ``(N, 3)`` points and colours.
+        """
+        assert self.enable_depth, "Depth is not enabled"
+        if not hasattr(self, "_xyzrgba_mat"):
+            self._xyzrgba_mat = sl.Mat()
+        if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+            self.zed.retrieve_measure(self._xyzrgba_mat, sl.MEASURE.XYZRGBA)
+            return self._xyzrgba_mat.get_data().copy()
+        logger.warning("{}: Failed to grab XYZRGBA", self)
+        return np.zeros((0, 0, 4), dtype=np.float32)
 
     def read_calibration_data_intrinsics(self) -> dict:
         return self.intrinsic_data
@@ -205,3 +224,65 @@ class ZedCamera:
     def stop(self) -> None:
         self.zed.close()
         logger.info("Stopped ZED camera: {}", self)
+
+
+def decode_xyzrgba(
+    xyzrgba: np.ndarray,
+    *,
+    stride: int = 4,
+    rotate_to_z_up: bool = True,
+) -> PointCloudData:
+    """Decode a ZED ``XYZRGBA`` measure into a :class:`PointCloudData`.
+
+    The ZED SDK packs RGBA into a single float32 channel.  This function
+    unpacks it, filters invalid (NaN/inf) points, and optionally
+    downsamples by *stride* for manageable point counts.
+
+    Parameters
+    ----------
+    xyzrgba : np.ndarray
+        ``(H, W, 4)`` float32 array from
+        ``cam.retrieve_measure(..., sl.MEASURE.XYZRGBA)`` or
+        :meth:`ZedCamera.read_xyzrgba`.
+    stride : int
+        Keep every *stride*-th valid point.  With HD720
+        (921 600 pixels) a stride of 4 yields ~57 k points.
+    rotate_to_z_up : bool
+        If ``True`` (default), rotate points from ZED camera convention
+        (X-right, Y-down, Z-forward) into Z-up convention (X-right,
+        Y-forward, Z-up).  Set to ``False`` to keep points in the
+        camera's native frame.
+
+    Returns
+    -------
+    PointCloudData
+        Decoded point cloud with ``points`` ``(N, 3)`` float32 and
+        ``colors`` ``(N, 3)`` uint8 RGB.
+    """
+    flat = xyzrgba.reshape(-1, 4)
+    valid = np.isfinite(flat[:, 0])
+    flat = flat[valid]
+
+    if stride > 1:
+        flat = flat[::stride]
+
+    cam_xyz = flat[:, :3]
+    if rotate_to_z_up:
+        points = np.empty_like(cam_xyz)
+        points[:, 0] = cam_xyz[:, 0]
+        points[:, 1] = cam_xyz[:, 2]
+        points[:, 2] = -cam_xyz[:, 1]
+    else:
+        points = cam_xyz.copy()
+
+    rgba_packed = flat[:, 3].view(np.uint32)
+    colors = np.stack(
+        [
+            (rgba_packed >> 16) & 0xFF,
+            (rgba_packed >> 8) & 0xFF,
+            rgba_packed & 0xFF,
+        ],
+        axis=-1,
+    ).astype(np.uint8)
+
+    return PointCloudData(points=points, colors=colors)

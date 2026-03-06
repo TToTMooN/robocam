@@ -104,9 +104,10 @@ writer.stop()  # flushes and waits for ffmpeg
 
 | Class | Description |
 |-------|-------------|
-| `CameraData` | Single capture: `.images` dict, `.timestamp` (ms), optional `.calibration_data`, `.imu_data` |
+| `CameraData` | Single capture: `.images` dict, `.timestamp` (ms), optional `.calibration_data`, `.imu_data`, `.depth_data`, `.point_cloud` |
 | `CameraSpec` | Named shape/dtype descriptor: `.name`, `.shape`, `.dtype` |
 | `IMUData` | Timestamp + 3D acceleration + gyroscope |
+| `PointCloudData` | Point cloud: `.points` `(N, 3)` float32 XYZ, `.colors` `(N, 3)` uint8 RGB |
 | `CameraDriver` | Protocol — any class with `read()`, `stop()`, `get_camera_info()`, `read_calibration_data_intrinsics()` |
 
 ### Drivers
@@ -137,6 +138,13 @@ Static method: `RealsenseCamera.discover_devices()` returns `[{serial, name}, ..
 | `enable_depth` | `bool` | `False` | Enable neural depth (NEURAL_PLUS) |
 
 Class method: `ZedCamera.check_available_cameras()`
+
+Additional methods (require `enable_depth=True`):
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `read_depth()` | `np.ndarray` | `(H, W)` float32 depth map |
+| `read_xyzrgba()` | `np.ndarray` | `(H, W, 4)` float32 XYZRGBA measure. Pass to `decode_xyzrgba()` for usable points + colours. |
 
 #### `robocam.drivers.opencv.OpencvCamera`
 
@@ -193,6 +201,22 @@ Non-blocking video writer using ffmpeg subprocess.
 | `resize_with_center_crop(images, h, w)` | Aspect-preserving resize + center crop |
 
 Both accept `(H, W, C)` or `(B, H, W, C)` numpy arrays.
+
+### Point Cloud Utilities
+
+| Function | Module | Description |
+|----------|--------|-------------|
+| `decode_xyzrgba(xyzrgba, *, stride=4, rotate_to_z_up=True)` | `robocam.drivers.zed` | Decode ZED XYZRGBA measure into `PointCloudData`. Filters invalid points, unpacks packed RGBA, optionally rotates to Z-up. |
+| `depth_to_pointcloud(depth, K, *, stride=1)` | `robocam.utils` | Back-project any `(H, W)` depth image into `(N, 3)` XYZ points using intrinsics matrix K. Works with any camera. |
+
+### Scripts
+
+| Script | Requires | Description |
+|--------|----------|-------------|
+| `scripts/view_cameras.py` | `robocam[all]`, `opencv-contrib-python`, `tyro` | Live OpenCV viewer for all connected cameras |
+| `scripts/view_realsense.py` | `robocam[realsense]`, `opencv-contrib-python`, `tyro` | Live OpenCV viewer for RealSense cameras |
+| `scripts/view_zed.py` | `robocam[zed]`, `opencv-contrib-python`, `tyro` | Live OpenCV viewer for ZED cameras |
+| `scripts/view_pointcloud.py` | `robocam[zed]`, `viser`, `tyro` | Live 3-D point cloud viewer for ZED cameras (web-based) |
 
 ## Architecture Notes
 
