@@ -22,9 +22,12 @@ all = ["pyrealsense2", "pyzed", "opencv-contrib-python", "Pillow"]
 [tool.flit.module]
 name = "robocam"
 
-# pyzed is not on PyPI. When using robocam[zed], provide the pyzed wheel
-# via [tool.uv.sources] in your project's pyproject.toml. See README.md.
-# For convenience, a vendored wheel is included in vendor/ for local installs.
+# pyzed is not on PyPI — there's a fake pyzed on PyPI that is unrelated.
+# This source ensures the real Stereolabs wheel is used for local development.
+# When consuming robocam as a git dependency, this source is ignored by uv;
+# the downstream project must configure pyzed in its own [tool.uv.sources].
+[tool.uv.sources]
+pyzed = { path = "vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 
 [tool.ruff]
 line-length = 119
