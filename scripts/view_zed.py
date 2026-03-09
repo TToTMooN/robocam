@@ -70,6 +70,8 @@ def main() -> None:
         enable_depth=args.depth,
         return_right_image=args.stereo,
     )
+    left_key = f"{cam.serial_number}_left"
+    right_key = f"{cam.serial_number}_right"
 
     show_id = args.show_id
     recording = False
@@ -91,17 +93,16 @@ def main() -> None:
                 continue  # grab failed
 
             # Build display image
-            left = data.images.get("left_rgb")
-            if left is None:
-                left = data.images.get("rgb")
+            left = data.images.get(left_key)
             if left is None:
                 continue
 
             bgr = cv2.cvtColor(left, cv2.COLOR_RGB2BGR)
             panels = [bgr]
 
-            if args.stereo and "right_rgb" in data.images:
-                right_bgr = cv2.cvtColor(data.images["right_rgb"], cv2.COLOR_RGB2BGR)
+            right = data.images.get(right_key)
+            if args.stereo and right is not None:
+                right_bgr = cv2.cvtColor(right, cv2.COLOR_RGB2BGR)
                 panels.append(right_bgr)
 
             if args.depth and data.depth_data is not None:

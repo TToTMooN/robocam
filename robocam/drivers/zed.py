@@ -282,9 +282,9 @@ def decode_xyzrgba(
     rgba_packed = flat[:, 3].view(np.uint32)
     colors = np.stack(
         [
-            (rgba_packed >> 16) & 0xFF,
-            (rgba_packed >> 8) & 0xFF,
             rgba_packed & 0xFF,
+            (rgba_packed >> 8) & 0xFF,
+            (rgba_packed >> 16) & 0xFF,
         ],
         axis=-1,
     ).astype(np.uint8)
