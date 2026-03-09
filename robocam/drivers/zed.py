@@ -113,11 +113,12 @@ class ZedCamera:
         self.runtime_parameters.confidence_threshold = 75
         self.camera_type = self.camera_info.camera_model.name
 
-        self.intrinsic_data = {
-            "left": self._load_intrinsic_data("left"),
-            "right": self._load_intrinsic_data("right"),
-        }
         self.serial_number: int = self.camera_info.serial_number if self.device_id is None else int(self.device_id)
+        self._serial_prefix = str(self.serial_number)
+        self.intrinsic_data = {
+            f"{self._serial_prefix}_left": self._load_intrinsic_data("left"),
+            f"{self._serial_prefix}_right": self._load_intrinsic_data("right"),
+        }
         logger.info("ZED ready: {}", self)
 
     def _load_intrinsic_data(self, camera_side: str, raw: bool = False) -> dict:
@@ -151,19 +152,21 @@ class ZedCamera:
 
             adjusted_ts = ts_image - self.image_transfer_time_offset_ms
 
+            s = self._serial_prefix
             if self.concat_image:
                 if not self.return_right_image:
                     raise RuntimeError("concat_image=True requires return_right_image=True")
                 left_rgb = np.ascontiguousarray(left_bgra[:, :, :3][:, :, ::-1])
                 right_rgb = np.ascontiguousarray(right_bgra[:, :, :3][:, :, ::-1])
                 result = CameraData(
-                    images={"rgb": np.concatenate([left_rgb, right_rgb], axis=1)}, timestamp=adjusted_ts
+                    images={f"{s}_concatenated": np.concatenate([left_rgb, right_rgb], axis=1)},
+                    timestamp=adjusted_ts,
                 )
             else:
                 left_rgb = np.ascontiguousarray(left_bgra[:, :, :3][:, :, ::-1])
-                images: Dict[str, np.ndarray] = {"left_rgb": left_rgb}
+                images: Dict[str, np.ndarray] = {f"{s}_left": left_rgb}
                 if self.return_right_image:
-                    images["right_rgb"] = np.ascontiguousarray(right_bgra[:, :, :3][:, :, ::-1])
+                    images[f"{s}_right"] = np.ascontiguousarray(right_bgra[:, :, :3][:, :, ::-1])
                 result = CameraData(images=images, timestamp=adjusted_ts)
 
             if self.enable_depth:
@@ -173,9 +176,10 @@ class ZedCamera:
             return result
 
         logger.warning("{}: Failed to grab image", self)
+        s = self._serial_prefix
         if self.concat_image:
-            return CameraData(images={"rgb": None}, timestamp=-1.0)  # type: ignore[arg-type]
-        return CameraData(images={"left_rgb": None, "right_rgb": None}, timestamp=-1.0)  # type: ignore[arg-type]
+            return CameraData(images={f"{s}_concatenated": None}, timestamp=-1.0)  # type: ignore[arg-type]
+        return CameraData(images={f"{s}_left": None, f"{s}_right": None}, timestamp=-1.0)  # type: ignore[arg-type]
 
     def read_depth(self) -> np.ndarray:
         """Read only depth map (requires ``enable_depth=True``)."""
