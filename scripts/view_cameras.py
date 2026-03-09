@@ -43,12 +43,16 @@ def discover_all() -> List[Dict]:
         from robocam.drivers.realsense import RealsenseCamera, discover_devices
 
         for dev in discover_devices():
-            found.append({
-                "type": "realsense",
-                "serial": dev["serial"],
-                "name": dev["name"],
-                "factory": lambda d=dev: RealsenseCamera(serial_number=d["serial"], fps=30, enable_depth=_args.depth),
-            })
+            found.append(
+                {
+                    "type": "realsense",
+                    "serial": dev["serial"],
+                    "name": dev["name"],
+                    "factory": lambda d=dev: RealsenseCamera(
+                        serial_number=d["serial"], fps=30, enable_depth=_args.depth
+                    ),
+                }
+            )
     except ImportError:
         logger.debug("pyrealsense2 not available, skipping RealSense discovery")
 
@@ -58,12 +62,14 @@ def discover_all() -> List[Dict]:
 
         for cam_info in sl.Camera.get_device_list():
             serial = str(cam_info.serial_number)
-            found.append({
-                "type": "zed",
-                "serial": serial,
-                "name": f"ZED ({cam_info.camera_model})",
-                "factory": lambda s=serial: _open_zed(s),
-            })
+            found.append(
+                {
+                    "type": "zed",
+                    "serial": serial,
+                    "name": f"ZED ({cam_info.camera_model})",
+                    "factory": lambda s=serial: _open_zed(s),
+                }
+            )
     except ImportError:
         logger.debug("pyzed not available, skipping ZED discovery")
 
@@ -103,8 +109,7 @@ def overlay_text(image: np.ndarray, text: str, position: tuple = (10, 30)) -> No
 
 def get_rgb(data: CameraData) -> Optional[np.ndarray]:
     """Extract the main RGB image from camera data."""
-    for key in ("rgb", "left_rgb"):
-        img = data.images.get(key)
+    for img in data.images.values():
         if img is not None:
             return img
     return None
