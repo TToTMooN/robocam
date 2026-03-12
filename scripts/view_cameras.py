@@ -30,7 +30,7 @@ import numpy as np
 import tyro
 from loguru import logger
 
-from robocam import AsyncVideoWriter
+from robocam import AsyncVideoWriter, CaptureThread, FrameBuffer
 from robocam.camera import CameraData, CameraDriver
 
 
@@ -172,6 +172,17 @@ def main() -> None:
         print("No cameras could be opened. Exiting.")
         return
 
+    # Start one capture thread per camera
+    buffers: Dict[str, FrameBuffer] = {}
+    capture_threads: Dict[str, CaptureThread] = {}
+    for label, cam in cameras.items():
+        buf = FrameBuffer(max_size=16)
+        ct = CaptureThread(camera_id=label, camera=cam, buffer=buf)
+        buffers[label] = buf
+        capture_threads[label] = ct
+    for ct in capture_threads.values():
+        ct.start()
+
     show_overlay = _args.show_id
     recording = False
     writers: Dict[str, AsyncVideoWriter] = {}
@@ -191,8 +202,11 @@ def main() -> None:
             frame_rgbs: Dict[str, np.ndarray] = {}
             elapsed = time.time() - t0
 
-            for label, cam in cameras.items():
-                data = cam.read()
+            for label in list(cameras.keys()):
+                try:
+                    data = buffers[label].get_latest(timeout_sec=0.05)
+                except TimeoutError:
+                    continue
                 rgb = get_rgb(data)
                 if rgb is None:
                     continue
@@ -257,6 +271,8 @@ def main() -> None:
     finally:
         for w in writers.values():
             w.stop()
+        for ct in capture_threads.values():
+            ct.stop(timeout=2.0)
         for cam in cameras.values():
             cam.stop()
         cv2.destroyAllWindows()

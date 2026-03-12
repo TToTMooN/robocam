@@ -114,6 +114,7 @@ class ZedCamera:
         self.image_right = sl.Mat()
         if self.enable_depth:
             self.depth_map = sl.Mat()
+            self._xyzrgba_mat = sl.Mat()
 
         self.camera_info = self.zed.get_camera_information()
         self.runtime_parameters = sl.RuntimeParameters()
@@ -179,6 +180,8 @@ class ZedCamera:
             if self.enable_depth:
                 self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
                 result.depth_data = np.ascontiguousarray(self.depth_map.get_data())
+                self.zed.retrieve_measure(self._xyzrgba_mat, sl.MEASURE.XYZRGBA)
+                result.other_sensors = {"xyzrgba": self._xyzrgba_mat.get_data().copy()}
 
             return result
 
