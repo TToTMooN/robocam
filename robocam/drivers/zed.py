@@ -34,6 +34,11 @@ RESOLUTION_SIZE_MAP = {
     "VGA": (640, 480),
     "SVGA": (960, 600),
 }
+DEPTH_MODE_MAP = {
+    "NEURAL_LIGHT": sl.DEPTH_MODE.NEURAL_LIGHT,
+    "NEURAL": sl.DEPTH_MODE.NEURAL,
+    "NEURAL_PLUS": sl.DEPTH_MODE.NEURAL_PLUS,
+}
 
 
 @dataclass
@@ -68,6 +73,8 @@ class ZedCamera:
     return_right_image: bool = False
     name: str | None = None
     enable_depth: bool = False
+    depth_mode: str = "NEURAL_PLUS"
+    """Depth mode: NEURAL_LIGHT, NEURAL, NEURAL_PLUS."""
 
     def __repr__(self) -> str:
         return f"ZedCamera(device_id={self.device_id!r}, name={self.name!r}, resolution={self.resolution}, fps={self.fps})"
@@ -88,7 +95,7 @@ class ZedCamera:
         self.width, self.height = RESOLUTION_SIZE_MAP[self.resolution]
         init_params.camera_fps = self.fps
         if self.enable_depth:
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL_PLUS
+            init_params.depth_mode = DEPTH_MODE_MAP[self.depth_mode]
             init_params.coordinate_units = sl.UNIT.METER
         else:
             init_params.depth_mode = sl.DEPTH_MODE.NONE
