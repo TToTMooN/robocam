@@ -30,7 +30,7 @@ import numpy as np
 import tyro
 from loguru import logger
 
-from robocam import AsyncVideoWriter
+from robocam import AsyncVideoWriter, CaptureThread, FrameBuffer
 from robocam.camera import CameraData, CameraDriver
 
 
@@ -43,12 +43,16 @@ def discover_all() -> List[Dict]:
         from robocam.drivers.realsense import RealsenseCamera, discover_devices
 
         for dev in discover_devices():
-            found.append({
-                "type": "realsense",
-                "serial": dev["serial"],
-                "name": dev["name"],
-                "factory": lambda d=dev: RealsenseCamera(serial_number=d["serial"], fps=30, enable_depth=_args.depth),
-            })
+            found.append(
+                {
+                    "type": "realsense",
+                    "serial": dev["serial"],
+                    "name": dev["name"],
+                    "factory": lambda d=dev: RealsenseCamera(
+                        serial_number=d["serial"], fps=30, enable_depth=_args.depth
+                    ),
+                }
+            )
     except ImportError:
         logger.debug("pyrealsense2 not available, skipping RealSense discovery")
 
@@ -58,12 +62,14 @@ def discover_all() -> List[Dict]:
 
         for cam_info in sl.Camera.get_device_list():
             serial = str(cam_info.serial_number)
-            found.append({
-                "type": "zed",
-                "serial": serial,
-                "name": f"ZED ({cam_info.camera_model})",
-                "factory": lambda s=serial: _open_zed(s),
-            })
+            found.append(
+                {
+                    "type": "zed",
+                    "serial": serial,
+                    "name": f"ZED ({cam_info.camera_model})",
+                    "factory": lambda s=serial: _open_zed(s),
+                }
+            )
     except ImportError:
         logger.debug("pyzed not available, skipping ZED discovery")
 
@@ -103,8 +109,7 @@ def overlay_text(image: np.ndarray, text: str, position: tuple = (10, 30)) -> No
 
 def get_rgb(data: CameraData) -> Optional[np.ndarray]:
     """Extract the main RGB image from camera data."""
-    for key in ("rgb", "left_rgb"):
-        img = data.images.get(key)
+    for img in data.images.values():
         if img is not None:
             return img
     return None
@@ -167,6 +172,17 @@ def main() -> None:
         print("No cameras could be opened. Exiting.")
         return
 
+    # Start one capture thread per camera
+    buffers: Dict[str, FrameBuffer] = {}
+    capture_threads: Dict[str, CaptureThread] = {}
+    for label, cam in cameras.items():
+        buf = FrameBuffer(max_size=16)
+        ct = CaptureThread(camera_id=label, camera=cam, buffer=buf)
+        buffers[label] = buf
+        capture_threads[label] = ct
+    for ct in capture_threads.values():
+        ct.start()
+
     show_overlay = _args.show_id
     recording = False
     writers: Dict[str, AsyncVideoWriter] = {}
@@ -186,8 +202,11 @@ def main() -> None:
             frame_rgbs: Dict[str, np.ndarray] = {}
             elapsed = time.time() - t0
 
-            for label, cam in cameras.items():
-                data = cam.read()
+            for label in list(cameras.keys()):
+                try:
+                    data = buffers[label].get_latest(timeout_sec=0.05)
+                except TimeoutError:
+                    continue
                 rgb = get_rgb(data)
                 if rgb is None:
                     continue
@@ -252,6 +271,8 @@ def main() -> None:
     finally:
         for w in writers.values():
             w.stop()
+        for ct in capture_threads.values():
+            ct.stop(timeout=2.0)
         for cam in cameras.values():
             cam.stop()
         cv2.destroyAllWindows()

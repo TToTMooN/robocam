@@ -109,8 +109,7 @@ class RealsenseCamera:
                 depth_array = np.ascontiguousarray(np.asarray(depth_frame.get_data()))
                 images["depth"] = depth_array
 
-        data = CameraData(images=images, timestamp=capture_time_ms)
-        data.depth_data = depth_array  # type: ignore[attr-defined]
+        data = CameraData(images=images, timestamp=capture_time_ms, depth_data=depth_array)
         return data
 
     def get_camera_info(self) -> Dict[str, Any]:
