@@ -7,17 +7,10 @@ No framework lock-in — works with any control loop, any process model.
 ## Install
 
 ```bash
-# Core (just protocol + buffer + video writer)
+uv sync
+
+# Or with pip
 pip install robocam
-
-# With camera drivers
-pip install robocam[realsense]    # Intel RealSense — self-contained, no system deps
-pip install robocam[zed]          # Stereolabs ZED — requires ZED SDK (see below)
-pip install robocam[opencv]       # Generic V4L2 / webcam
-pip install robocam[all]          # Everything
-
-# Development (editable)
-pip install -e .[all]
 ```
 
 ### pyzed (not on PyPI)
@@ -165,6 +158,45 @@ Thread-safe ring buffer of `CameraData` frames.
 | `len(buf)` | Current buffer size |
 | `buf.count` | Total frames ever inserted |
 
+### CaptureThread
+
+Daemon thread that continuously reads from one camera into a `FrameBuffer`. Decouples camera I/O from the control loop so consumers never block on `camera.read()`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `camera_id` | `str` | — | Label for logging and thread name |
+| `camera` | `CameraDriver` | — | Already-opened camera driver to poll |
+| `buffer` | `FrameBuffer` | — | Destination buffer (written by thread, read by consumers) |
+| `max_consecutive_errors` | `int` | `10` | Successive `read()` failures before the thread gives up |
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `start()` | Spawn the capture daemon thread |
+| `stop(timeout=2.0)` | Signal stop and join. Call **before** `camera.stop()` |
+| `is_alive()` | Whether the capture thread is currently running |
+| `frame_count` | Total frames captured since `start()` |
+| `failed` | `True` if the thread exited due to too many consecutive errors |
+
+**Important: CaptureThread works with ZED but NOT RealSense.**
+See [Threading Model](#threading-model) below for details.
+
+```python
+from robocam import CaptureThread, FrameBuffer
+from robocam.drivers.zed import ZedCamera
+
+cam = ZedCamera(device_id="38082408", fps=30)
+buf = FrameBuffer(max_size=16)
+ct = CaptureThread(camera_id="wrist", camera=cam, buffer=buf)
+ct.start()
+
+# Consumer (control loop)
+frame = buf.get_latest()
+
+# Shutdown
+ct.stop()
+cam.stop()
+```
+
 ### AsyncVideoWriter
 
 Non-blocking video writer using ffmpeg subprocess.
@@ -194,6 +226,40 @@ Non-blocking video writer using ffmpeg subprocess.
 
 Both accept `(H, W, C)` or `(B, H, W, C)` numpy arrays.
 
+## Threading Model
+
+Different camera SDKs have fundamentally different threading constraints:
+
+| SDK | Thread-safe? | Recommended pattern |
+|-----|-------------|-------------------|
+| **ZED** (`sl.Camera.grab()`) | Yes | `CaptureThread` — one daemon thread per camera |
+| **RealSense** (`pipeline.wait_for_frames()`) | **No — main thread only** | Poll sequentially on the main thread |
+| **OpenCV** (`cv2.VideoCapture.read()`) | Yes (per device) | `CaptureThread` or main-thread polling |
+
+### RealSense main-thread constraint
+
+`pyrealsense2`'s `pipeline.wait_for_frames()` must be called from the **main thread**. Background threads receive ~16 internally-queued frames then permanently stall. This is a hard SDK / libusb limitation — not a contention or configuration issue.
+
+**Workarounds for multi-camera RealSense:**
+1. **Sequential main-thread polling** — simple, no overhead, works for 2-4 cameras at moderate FPS. This is what `scripts/view_cameras.py` does.
+2. **Separate processes** — one process per camera with SharedMemory IPC (see [jc211/realsense](https://github.com/jc211/realsense)) or Portal RPC (see limb). Required for high-frequency control loops where main-thread blocking is unacceptable.
+
+### Mixed setups (RealSense + ZED)
+
+`view_cameras.py` demonstrates the hybrid pattern:
+- RealSense cameras: polled directly in the main-thread display loop (`cam.read()`)
+- ZED cameras: each on its own `CaptureThread`, read via `FrameBuffer`
+
+```python
+# RealSense — main thread
+for label, cam in rs_cameras.items():
+    data = cam.read()  # blocking, but only ~33ms per camera at 30fps
+
+# ZED — background thread
+for label, buf in zed_buffers.items():
+    data = buf.get_latest(timeout_sec=0.05)  # non-blocking read from CaptureThread
+```
+
 ## Architecture Notes
 
 ### Why separate from your control framework?
@@ -215,7 +281,7 @@ robocam provides the **camera primitives** — drivers, frame buffering, video e
 
 ### FrameBuffer vs shared-memory ring buffer
 
-For **in-process** use (camera polling thread -> control loop reader), `FrameBuffer` with a `threading.Lock` is simpler and sufficient. Shared-memory ring buffers (like jc211/realsense) are needed when the reader and writer are in **different OS processes** — at the cost of ~500 lines of atomics/shared-memory infrastructure.
+For **in-process** use (camera polling thread -> control loop reader), `FrameBuffer` with `threading.Condition` is simpler and sufficient — `get_latest()` wakes up instantly when a new frame arrives (no spin-polling). Shared-memory ring buffers (like jc211/realsense) are needed when the reader and writer are in **different OS processes** — at the cost of ~500 lines of atomics/shared-memory infrastructure.
 
 ## License
 

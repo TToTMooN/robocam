@@ -3,6 +3,14 @@
 
 Auto-discovers all RealSense and ZED cameras and displays them in a grid.
 
+Threading model
+---------------
+- **RealSense** — polled on the **main thread** (sequential).
+  pyrealsense2 requires ``wait_for_frames()`` on the main thread; background
+  threads receive ~16 buffered frames then permanently stall.
+- **ZED** — each camera runs on a **CaptureThread** (daemon thread).
+  ``sl.Camera.grab()`` is fully thread-safe.
+
 Controls
 --------
 s  - toggle device-id overlay
@@ -30,7 +38,7 @@ import numpy as np
 import tyro
 from loguru import logger
 
-from robocam import AsyncVideoWriter
+from robocam import AsyncVideoWriter, CaptureThread, FrameBuffer
 from robocam.camera import CameraData, CameraDriver
 
 
@@ -43,12 +51,16 @@ def discover_all() -> List[Dict]:
         from robocam.drivers.realsense import RealsenseCamera, discover_devices
 
         for dev in discover_devices():
-            found.append({
-                "type": "realsense",
-                "serial": dev["serial"],
-                "name": dev["name"],
-                "factory": lambda d=dev: RealsenseCamera(serial_number=d["serial"], fps=30, enable_depth=_args.depth),
-            })
+            found.append(
+                {
+                    "type": "realsense",
+                    "serial": dev["serial"],
+                    "name": dev["name"],
+                    "factory": lambda d=dev: RealsenseCamera(
+                        serial_number=d["serial"], fps=30, enable_depth=_args.depth
+                    ),
+                }
+            )
     except ImportError:
         logger.debug("pyrealsense2 not available, skipping RealSense discovery")
 
@@ -58,12 +70,14 @@ def discover_all() -> List[Dict]:
 
         for cam_info in sl.Camera.get_device_list():
             serial = str(cam_info.serial_number)
-            found.append({
-                "type": "zed",
-                "serial": serial,
-                "name": f"ZED ({cam_info.camera_model})",
-                "factory": lambda s=serial: _open_zed(s),
-            })
+            found.append(
+                {
+                    "type": "zed",
+                    "serial": serial,
+                    "name": f"ZED ({cam_info.camera_model})",
+                    "factory": lambda s=serial: _open_zed(s),
+                }
+            )
     except ImportError:
         logger.debug("pyzed not available, skipping ZED discovery")
 
@@ -103,8 +117,7 @@ def overlay_text(image: np.ndarray, text: str, position: tuple = (10, 30)) -> No
 
 def get_rgb(data: CameraData) -> Optional[np.ndarray]:
     """Extract the main RGB image from camera data."""
-    for key in ("rgb", "left_rgb"):
-        img = data.images.get(key)
+    for img in data.images.values():
         if img is not None:
             return img
     return None
@@ -154,18 +167,48 @@ def main() -> None:
     # Open all cameras
     cameras: Dict[str, CameraDriver] = {}
     camera_labels: Dict[str, str] = {}
+    camera_types: Dict[str, str] = {}
     for d in devices:
         label = f"{d['type']}:{d['serial']}"
         logger.info("Opening {} ({})", label, d["name"])
         try:
             cameras[label] = d["factory"]()
             camera_labels[label] = f"{d['type'].upper()} {d['serial']}"
+            camera_types[label] = d["type"]
         except Exception as e:
             logger.warning("Failed to open {}: {}", label, e)
 
     if not cameras:
         print("No cameras could be opened. Exiting.")
         return
+
+    # Split cameras by type — different threading strategies per SDK.
+    #
+    # RealSense: polled on the MAIN THREAD.  pyrealsense2 requires
+    #   wait_for_frames() on the thread that called pipeline.start().
+    #   Background threads receive ~16 internally-queued frames then
+    #   permanently stall — this is a hard SDK / libusb limitation.
+    #
+    # ZED: each camera gets its own CaptureThread (daemon thread).
+    #   sl.Camera.grab() is fully thread-safe and works from any thread.
+    rs_cameras: Dict[str, CameraDriver] = {}
+    zed_buffers: Dict[str, FrameBuffer] = {}
+    capture_threads: Dict[str, CaptureThread] = {}
+
+    for label, cam in cameras.items():
+        if camera_types[label] == "realsense":
+            rs_cameras[label] = cam
+        else:
+            buf = FrameBuffer(max_size=16)
+            zed_buffers[label] = buf
+            ct = CaptureThread(camera_id=label, camera=cam, buffer=buf)
+            ct.start()
+            capture_threads[label] = ct
+
+    if rs_cameras:
+        logger.info("RealSense cameras ({}) → main-thread polling", len(rs_cameras))
+    if capture_threads:
+        logger.info("ZED cameras ({}) → CaptureThread", len(capture_threads))
 
     show_overlay = _args.show_id
     recording = False
@@ -186,8 +229,35 @@ def main() -> None:
             frame_rgbs: Dict[str, np.ndarray] = {}
             elapsed = time.time() - t0
 
-            for label, cam in cameras.items():
-                data = cam.read()
+            # --- RealSense: blocking read on main thread (sequential) ---
+            for label, cam in rs_cameras.items():
+                try:
+                    data = cam.read()
+                except Exception as e:
+                    logger.warning("RealSense read error ({}): {}", label, e)
+                    continue
+                rgb = get_rgb(data)
+                if rgb is None:
+                    continue
+
+                cam_frame_counts[label] += 1
+                frame_rgbs[label] = rgb
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+                if show_overlay:
+                    if elapsed > 0:
+                        fps = cam_frame_counts[label] / elapsed
+                        overlay_text(bgr, f"{fps:.1f} fps", (bgr.shape[1] - 150, 30))
+                    overlay_text(bgr, camera_labels[label])
+
+                tiles.append(bgr)
+
+            # --- ZED: read latest from CaptureThread buffers ---
+            for label, buf in zed_buffers.items():
+                try:
+                    data = buf.get_latest(timeout_sec=0.05)
+                except TimeoutError:
+                    continue
                 rgb = get_rgb(data)
                 if rgb is None:
                     continue
@@ -252,6 +322,8 @@ def main() -> None:
     finally:
         for w in writers.values():
             w.stop()
+        for ct in capture_threads.values():
+            ct.stop(timeout=2.0)
         for cam in cameras.values():
             cam.stop()
         cv2.destroyAllWindows()

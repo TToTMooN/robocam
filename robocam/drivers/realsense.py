@@ -1,6 +1,16 @@
 """Intel RealSense D400-series camera driver.
 
-Requires: ``pip install robocam[realsense]``
+**Main-thread constraint**: ``pipeline.wait_for_frames()`` must be called
+from the main thread.  Background threads receive ~16 internally-queued
+frames then permanently stall — this is a hard pyrealsense2 / libusb
+limitation, not a contention issue.
+
+For multi-camera setups:
+- Poll all RealSense cameras **sequentially on the main thread**, or
+- Use separate **processes** per camera (e.g. ``limb``'s Portal RPC,
+  or jc211/realsense SharedMemory pattern).
+
+Do NOT use :class:`CaptureThread` or :class:`CaptureGroup` with RealSense.
 """
 
 from __future__ import annotations
@@ -17,7 +27,7 @@ from robocam.camera import CameraData
 try:
     import pyrealsense2 as rs
 except ImportError as _e:
-    raise ImportError("pyrealsense2 is required: pip install robocam[realsense]") from _e
+    raise ImportError("pyrealsense2 is required: pip install pyrealsense2") from _e
 
 
 def discover_devices() -> List[Dict[str, str]]:
@@ -57,37 +67,51 @@ class RealsenseCamera:
     camera_type: str = "realsense_camera"
     name: Optional[str] = None
 
-    pipeline: Any = field(init=False, repr=False)
-    profile: Any = field(init=False, repr=False)
+    pipeline: Any = field(init=False, repr=False, default=None)
+    profile: Any = field(init=False, repr=False, default=None)
     _align: Any = field(init=False, repr=False, default=None)
+    _cfg: Any = field(init=False, repr=False, default=None)
+    _started: bool = field(init=False, repr=False, default=False)
 
     def __repr__(self) -> str:
         id_str = self.serial_number or "first-available"
         return f"RealsenseCamera({id_str!r}, name={self.name!r}, resolution={self.resolution}, fps={self.fps})"
 
     def __post_init__(self) -> None:
-        cfg = rs.config()
+        self._cfg = rs.config()
         if self.serial_number:
-            cfg.enable_device(self.serial_number)
+            self._cfg.enable_device(self.serial_number)
 
         w, h = self.resolution
-        cfg.enable_stream(rs.stream.color, w, h, rs.format.rgb8, self.fps)
+        self._cfg.enable_stream(rs.stream.color, w, h, rs.format.rgb8, self.fps)
         if self.enable_depth:
-            cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, self.fps)
+            self._cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, self.fps)
 
         self.pipeline = rs.pipeline()
-        self.profile = self.pipeline.start(cfg)
+        logger.info("RealsenseCamera configured: {}", self)
 
+    def _ensure_started(self) -> None:
+        """Start the pipeline on the calling thread.
+
+        pyrealsense2 requires ``wait_for_frames()`` to run on the same thread
+        as ``pipeline.start()``.  Deferring start to the first ``read()``
+        ensures it works whether called from the main thread, a CaptureThread,
+        or a CaptureGroup.
+        """
+        if self._started:
+            return
+        self.profile = self.pipeline.start(self._cfg)
         if self.enable_depth:
             self._align = rs.align(rs.stream.color)
-
         device = self.profile.get_device()
         actual_serial = device.get_info(rs.camera_info.serial_number)
         if self.serial_number is None:
             self.serial_number = actual_serial
+        self._started = True
         logger.info("Opened RealSense {} ({})", actual_serial, device.get_info(rs.camera_info.name))
 
     def read(self) -> CameraData:
+        self._ensure_started()
         frames = self.pipeline.wait_for_frames()
 
         if self._align is not None:
@@ -114,6 +138,7 @@ class RealsenseCamera:
         return data
 
     def get_camera_info(self) -> Dict[str, Any]:
+        self._ensure_started()
         device = self.profile.get_device()
         return {
             "camera_type": self.camera_type,
@@ -127,6 +152,7 @@ class RealsenseCamera:
         }
 
     def read_calibration_data_intrinsics(self) -> Dict[str, Any]:
+        self._ensure_started()
         color_stream = self.profile.get_stream(rs.stream.color).as_video_stream_profile()
         intr = color_stream.get_intrinsics()
         K = np.array([[intr.fx, 0.0, intr.ppx], [0.0, intr.fy, intr.ppy], [0.0, 0.0, 1.0]])
@@ -141,12 +167,16 @@ class RealsenseCamera:
         if self.enable_depth:
             depth_stream = self.profile.get_stream(rs.stream.depth).as_video_stream_profile()
             d_intr = depth_stream.get_intrinsics()
-            result["depth_K"] = np.array([[d_intr.fx, 0.0, d_intr.ppx], [0.0, d_intr.fy, d_intr.ppy], [0.0, 0.0, 1.0]])
+            result["depth_K"] = np.array(
+                [[d_intr.fx, 0.0, d_intr.ppx], [0.0, d_intr.fy, d_intr.ppy], [0.0, 0.0, 1.0]]
+            )
             result["depth_D"] = np.array(d_intr.coeffs)
         return result
 
     def stop(self) -> None:
-        self.pipeline.stop()
+        if self._started:
+            self.pipeline.stop()
+            self._started = False
         logger.info("Stopped RealSense {}", self.serial_number)
 
     @staticmethod

@@ -1,7 +1,4 @@
-"""Generic V4L2 / OpenCV camera driver.
-
-Requires: ``pip install robocam[opencv]``
-"""
+"""Generic V4L2 / OpenCV camera driver."""
 
 from __future__ import annotations
 
@@ -18,7 +15,7 @@ from robocam.camera import CameraData
 try:
     import cv2
 except ImportError as _e:
-    raise ImportError("opencv-contrib-python is required: pip install robocam[opencv]") from _e
+    raise ImportError("opencv-contrib-python is required: pip install opencv-contrib-python") from _e
 
 V4L_BY_ID_DIR = Path("/dev/v4l/by-id")
 
