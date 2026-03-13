@@ -97,8 +97,9 @@ writer.stop()  # flushes and waits for ffmpeg
 
 | Class | Description |
 |-------|-------------|
-| `CameraData` | Single capture: `.images` dict, `.timestamp` (ms), optional `.calibration_data`, `.imu_data` |
+| `CameraData` | Single capture: `.images` dict, `.timestamp` (ms), optional `.depth_data`, `.point_cloud`, `.calibration_data`, `.imu_data` |
 | `CameraSpec` | Named shape/dtype descriptor: `.name`, `.shape`, `.dtype` |
+| `PointCloudData` | Point cloud: `.points` `(N, 3)` float32 XYZ, `.colors` `(N, 3)` uint8 RGB |
 | `IMUData` | Timestamp + 3D acceleration + gyroscope |
 | `CameraDriver` | Protocol — any class with `read()`, `stop()`, `get_camera_info()`, `read_calibration_data_intrinsics()` |
 
@@ -217,14 +218,21 @@ Non-blocking video writer using ffmpeg subprocess.
 | `write(frame)` | Enqueue RGB uint8 `(H, W, 3)` frame |
 | `stop()` | Flush queue, wait for ffmpeg to finish |
 
-### Image Utilities (`robocam.utils`)
+### Utilities (`robocam.utils`)
 
 | Function | Description |
 |----------|-------------|
+| `depth_to_pointcloud(depth, K, stride=1)` | Back-project `(H, W)` depth image to `(N, 3)` XYZ using intrinsics K. Works with any camera. |
 | `resize_with_pad(images, h, w)` | Aspect-preserving resize + black padding |
 | `resize_with_center_crop(images, h, w)` | Aspect-preserving resize + center crop |
 
-Both accept `(H, W, C)` or `(B, H, W, C)` numpy arrays.
+### ZED Point Cloud (`robocam.drivers.zed`)
+
+| Function | Description |
+|----------|-------------|
+| `decode_xyzrgba(xyzrgba, stride=4, rotate_to_z_up=True)` | Decode ZED `XYZRGBA` measure into `PointCloudData`. Faster than `depth_to_pointcloud` for ZED — avoids back-projection. |
+
+`ZedCamera` also has `read_xyzrgba()` for standalone XYZRGBA retrieval.
 
 ## Threading Model
 
