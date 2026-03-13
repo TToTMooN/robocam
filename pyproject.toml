@@ -10,14 +10,12 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "numpy",
     "loguru",
+    "tyro",
+    "opencv-contrib-python",
+    "Pillow",
+    "pyrealsense2",
+    "pyzed",
 ]
-
-[project.optional-dependencies]
-realsense = ["pyrealsense2"]
-zed = ["pyzed"]
-opencv = ["opencv-contrib-python"]
-image = ["opencv-contrib-python", "Pillow"]
-all = ["pyrealsense2", "pyzed", "opencv-contrib-python", "Pillow"]
 
 [tool.flit.module]
 name = "robocam"

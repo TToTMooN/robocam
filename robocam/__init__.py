@@ -3,6 +3,7 @@
 __version__ = "0.1.0"
 
 from robocam.camera import CameraData, CameraDriver, CameraSpec, IMUData
+from robocam.capture_thread import CaptureGroup, CaptureThread
 from robocam.frame_buffer import FrameBuffer
 from robocam.video_writer import AsyncVideoWriter
 
@@ -11,6 +12,8 @@ __all__ = [
     "CameraDriver",
     "CameraSpec",
     "IMUData",
+    "CaptureGroup",
+    "CaptureThread",
     "FrameBuffer",
     "AsyncVideoWriter",
 ]

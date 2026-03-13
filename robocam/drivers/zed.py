@@ -1,6 +1,7 @@
 """Stereolabs ZED camera driver.
 
-Requires: ``pip install robocam[zed]``  (or a local pyzed wheel)
+``sl.Camera.grab()`` is fully thread-safe — use :class:`CaptureThread`
+for background capture in multi-camera setups.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from robocam.camera import CameraData
 try:
     from pyzed import sl
 except ImportError as _e:
-    raise ImportError("pyzed is required for ZedCamera: pip install robocam[zed]") from _e
+    raise ImportError("pyzed is required for ZedCamera: pip install pyzed") from _e
 
 RESOLUTION_MAP = {
     "HD2K": sl.RESOLUTION.HD2K,
