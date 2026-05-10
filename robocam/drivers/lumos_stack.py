@@ -306,7 +306,13 @@ def _cli() -> int:
 
     p_up = sub.add_parser("up", help="bring up docker + xv_sdk + senders")
     p_up.add_argument("--serial", default=None, help="tracker UUID (auto-detect if omitted)")
-    p_up.add_argument("--no-color", action="store_true", help="don't start color_camera")
+    # Tri-state: --color forces on, --no-color forces off, neither = honor
+    # FASTUMI_ENABLE_COLOR env var via LumosStack's dataclass default.
+    color_grp = p_up.add_mutually_exclusive_group()
+    color_grp.add_argument("--color", dest="color", action="store_true", default=None,
+                           help="force-start color_camera (overrides FASTUMI_ENABLE_COLOR)")
+    color_grp.add_argument("--no-color", dest="color", action="store_false",
+                           help="don't start color_camera (overrides FASTUMI_ENABLE_COLOR)")
     p_up.add_argument("--receiver-ip", default=DEFAULT_RECEIVER_IP)
     p_up.add_argument("--container", default=DEFAULT_CONTAINER)
     p_up.add_argument("--tcp-port", default=DEFAULT_TCP_PORT)
@@ -325,18 +331,22 @@ def _cli() -> int:
 
     args = p.parse_args()
     if args.cmd == "up":
-        up(
+        kwargs = dict(
             serial=args.serial,
             container=args.container,
             receiver_ip=args.receiver_ip,
             tcp_port=args.tcp_port,
             image_tcp_port=args.image_tcp_port,
             slam_wait_s=args.slam_wait_s,
-            enable_color=not args.no_color,
             jpeg_quality=args.jpeg_quality,
             max_fps=args.max_fps,
             downscale=args.downscale,
         )
+        # Only forward enable_color when the user passed --color/--no-color.
+        # Otherwise let the dataclass default (FASTUMI_ENABLE_COLOR) apply.
+        if args.color is not None:
+            kwargs["enable_color"] = args.color
+        up(**kwargs)
     elif args.cmd == "down":
         down(container=args.container, also_stop_xv_sdk=args.also_stop_xv_sdk)
     return 0
