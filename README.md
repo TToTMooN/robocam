@@ -29,6 +29,7 @@ pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyz
 | **RealSense** | `pyrealsense2` | No | Wheel bundles `librealsense`. Just install and go. |
 | **ZED** | `pyzed` | **Yes — ZED SDK required** | `pyzed` is only thin Python bindings. The runtime (`libsl_zed.so`, CUDA kernels, neural depth models) must be installed separately. |
 | **OpenCV** | `opencv-contrib-python` | No | Self-contained wheel. |
+| **Lumos** (FastUMI Pro) | none — TCP receiver | **Yes — docker stack + XVSDK + udev rules** | Frames arrive over TCP from `xv_sdk` running in a docker container. See [Lumos / FastUMI setup](#lumos--fastumi-setup). |
 
 ### ZED SDK setup
 
@@ -49,6 +50,49 @@ If you see `libsl_zed.so: cannot open shared object file`, the SDK is not instal
 ```bash
 export LD_LIBRARY_PATH=/usr/local/zed/lib:$LD_LIBRARY_PATH
 ```
+
+### Lumos / FastUMI setup
+
+The Lumos tracker isn't talked to directly — `xv_sdk` runs inside a docker container (ROS1 Noetic) and TCP-ships frames + pose to the host, where `LumosCamera` receives them. Three things have to be in place before `LumosCamera` will work.
+
+The upstream sources live under `/root/fastumi_driver/` (git-tracked).
+
+**1. Install the udev rules so the host opens the tracker at mode 666 on plug-in.** Without this, `xv_sdk` fails with `LIBUSB_ERROR_ACCESS` and `lumos_stack up` times out waiting for the device namespace.
+
+```bash
+sudo cp /root/fastumi_driver/FastUMI_Hardware_SDK/xv/scripts/99-xvisio.rules \
+        /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# unplug + replug the tracker, then verify:
+ls -l $(lsusb | awk '/040e:/ {printf "/dev/bus/usb/%s/%s\n",$2,substr($4,1,3)}')
+# should show: crw-rw-rw-  (mode 666)
+```
+
+**2. Build the `fastumi` docker image / container** (one-time):
+
+```bash
+cd /root/fastumi_driver/fastumi-docker && sudo ./run.sh
+```
+
+The first run also builds the image. The container uses `--rm`, so it lives only as long as that shell — leave it open, or drop `--rm` from `run.sh` if you want it persistent across sessions.
+
+**3. Install the XVSDK `.deb` inside the container** (must be redone any time the container is recreated, since `/usr/lib` doesn't persist):
+
+```bash
+docker exec -u root fastumi bash -c \
+    "apt-get install -y dh-exec libcereal-dev libv4l-dev && \
+     dpkg -i /opt/fastumi_sdk/xv/sdk/20260312/XVSDK_focal_amd64.deb"
+```
+
+Without it, `xv_sdk` dies with `libxvsdk.so: cannot open shared object file`.
+
+After all three, bring up the stack and run a viewer:
+
+```bash
+uv run scripts/view_lumos.py --bring-up
+```
+
+See `robocam/drivers/lumos.py` (host-side receiver) and `robocam/drivers/lumos_stack.py` (docker / xv_sdk lifecycle) for the runtime knobs (all `FASTUMI_*` env vars).
 
 ## Quick Start
 
