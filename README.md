@@ -62,7 +62,7 @@ The upstream sources live under `~/fastumi_driver/` on this host (git-tracked). 
 The rule itself is one line — `SUBSYSTEM=="usb", ATTR{idVendor}=="040e", MODE="0666", GROUP="plugdev"` — matching XVisio's USB vendor ID.
 
 ```bash
-sudo cp ~/fastumi_driver/FastUMI_Hardware_SDK/xv/scripts/99-xvisio.rules \
+sudo cp ~/fastumi_driver/fastumi-docker/scripts/99-xvisio.rules \
         /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -77,7 +77,7 @@ This is one-time. Once installed, every replug fires the rule automatically — 
 **2. Build the `fastumi` docker image / container** (one-time):
 
 ```bash
-cd ~/fastumi_driver/fastumi-docker && sudo ./run.sh
+cd ~/fastumi_driver/fastumi-docker && ./run.sh
 ```
 
 The first run also builds the image. The container uses `--rm`, so it lives only as long as that shell — leave it open, or drop `--rm` from `run.sh` if you want it persistent across sessions.
@@ -96,7 +96,15 @@ Without it, `xv_sdk` dies with `libxvsdk.so: cannot open shared object file`. To
 After all three, bring up the stack and run a viewer:
 
 ```bash
+# 2D cv2 viewer — image tiles + pose overlay + optional recording
 uv run scripts/view_lumos.py --bring-up
+
+# 3D web viewer (viser) — recommended for SLAM bring-up. Shows the
+# tracker pose as an oriented frame, the SLAM trajectory as a polyline,
+# and surfaces the SLAM confidence + a min-confidence gate in the GUI
+# so you can immediately see whether tracking is locked.
+uv run scripts/view_lumos_viser.py --bring-up
+# then open http://localhost:8080
 ```
 
 See `robocam/drivers/lumos.py` (host-side receiver) and `robocam/drivers/lumos_stack.py` (docker / xv_sdk lifecycle) for the runtime knobs (all `FASTUMI_*` env vars).
@@ -112,10 +120,14 @@ Measured on this hardware (Lumos on USB-2, Bus 03):
 | `imu_sensor/data_raw` | ~500 Hz | Reaches `LumosCamera` at ~100 Hz (pose sender batches one envelope per 10 ms) |
 | `slam/pose`, `clamp/Data` | ~30 Hz | Latched into the 100 Hz pose envelope |
 
-**USB bandwidth caveat:** on a USB-2 link (`lsusb -t` shows `480M` next to the tracker), enabling color saturates the bus and starves fisheye to ~1.6 Hz. Two options:
+**USB bandwidth caveat — USB-3 is required for stable SLAM.** On a USB-2 link (`lsusb -t` shows `480M` next to the tracker) two things go wrong:
 
-- **Move the tracker to a USB-3 port.** Most laptops have both — check `lsusb -t` for a parent root hub at `5000M` or higher and replug there. Color and fisheye then coexist cleanly.
-- **Stay on USB-2 but pick one or the other:** `lumos_stack up --no-color` for full ~12 Hz fisheye, or accept color and let fisheye degrade.
+1. Enabling color saturates the bus and starves fisheye to ~1.6 Hz.
+2. Even with color off, fisheye frames arrive out-of-order under USB-2 pressure. `xv_sdk` logs `Last FE<...> host time stamp ... is greater than this frame` and rejects the non-monotonic frames, so SLAM `confidence` flaps between 0 and 1 and the pose is unusable. Check with `docker exec fastumi tail -50 /tmp/xv_sdk.log | grep -c 'host time stamp'` — a healthy run reports `0`.
+
+**Fix:** move the tracker to a USB-3 port. Check `lsusb -t` for a parent root hub at `5000M` or higher and replug there. Color and fisheye then coexist cleanly and SLAM stays locked.
+
+If USB-3 is genuinely unavailable, run `lumos_stack up --no-color` to free as much bandwidth as possible — but expect intermittent SLAM dropouts on USB-2 regardless.
 
 Measure rates yourself with `rostopic hz` inside the container, or with the receiver-side script in the PR description.
 
