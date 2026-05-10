@@ -28,6 +28,14 @@ class CameraSpec:
 
 
 @dataclass
+class PointCloudData:
+    """Point cloud from a depth-capable camera."""
+
+    points: np.ndarray  # (N, 3) float32 XYZ
+    colors: np.ndarray  # (N, 3) uint8 RGB
+
+
+@dataclass
 class CameraData:
     """Single capture from a camera driver."""
 
@@ -35,6 +43,8 @@ class CameraData:
     timestamp: float  # milliseconds
     calibration_data: Optional[dict] = None
     imu_data: Optional[IMUData] = None
+    depth_data: Optional[np.ndarray] = None  # (H, W) float32 depth map
+    point_cloud: Optional[PointCloudData] = None
     other_sensors: Optional[dict] = None
 
 

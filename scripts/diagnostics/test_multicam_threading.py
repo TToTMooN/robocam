@@ -58,12 +58,10 @@ def discover_cameras() -> tuple[Dict[str, CameraDriver], Dict[str, CameraDriver]
         logger.debug("pyrealsense2 not available")
 
     try:
-        from pyzed import sl
+        from robocam.drivers.zed import ZedCamera, discover_devices as zed_discover
 
-        from robocam.drivers.zed import ZedCamera
-
-        for cam_info in sl.Camera.get_device_list():
-            serial = str(cam_info.serial_number)
+        for dev in zed_discover():
+            serial = dev["serial"]
             label = f"zed:{serial}"
             logger.info("Opening {}", label)
             try:

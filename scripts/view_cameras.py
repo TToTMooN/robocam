@@ -66,16 +66,15 @@ def discover_all() -> List[Dict]:
 
     # ZED
     try:
-        from pyzed import sl
+        from robocam.drivers.zed import discover_devices as zed_discover
 
-        for cam_info in sl.Camera.get_device_list():
-            serial = str(cam_info.serial_number)
+        for dev in zed_discover():
             found.append(
                 {
                     "type": "zed",
-                    "serial": serial,
-                    "name": f"ZED ({cam_info.camera_model})",
-                    "factory": lambda s=serial: _open_zed(s),
+                    "serial": dev["serial"],
+                    "name": f"ZED ({dev['name']})",
+                    "factory": lambda s=dev["serial"]: _open_zed(s),
                 }
             )
     except ImportError:

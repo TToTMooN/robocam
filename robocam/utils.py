@@ -1,4 +1,4 @@
-"""Generic image processing utilities for robotics camera pipelines.
+"""Generic image and point cloud utilities for robotics camera pipelines.
 
 All functions work on plain numpy arrays — no framework dependency.
 OpenCV and Pillow are lazy-imported so the base package stays lightweight.
@@ -107,3 +107,53 @@ def _crop_single(image: Any, height: int, width: int) -> Any:
     if cropped.size != (width, height):
         cropped = cropped.resize((width, height), resample=_PIL.BILINEAR)
     return cropped
+
+
+def depth_to_pointcloud(
+    depth: np.ndarray,
+    K: np.ndarray,
+    *,
+    stride: int = 1,
+) -> np.ndarray:
+    """Back-project a depth image into a 3-D point cloud using camera intrinsics.
+
+    Works with any depth source (RealSense, ZED depth-only, etc.).  For ZED
+    cameras with packed XYZRGBA data, prefer :func:`robocam.drivers.zed.decode_xyzrgba`
+    which is faster and preserves per-point colour.
+
+    Parameters
+    ----------
+    depth : np.ndarray
+        ``(H, W)`` depth image in arbitrary linear units (typically metres).
+        Non-finite values (NaN, inf) are discarded.
+    K : np.ndarray
+        ``(3, 3)`` camera intrinsics matrix::
+
+            [[fx,  0, cx],
+             [ 0, fy, cy],
+             [ 0,  0,  1]]
+    stride : int
+        Spatial down-sampling factor.  ``stride=2`` keeps every other pixel
+        in both dimensions, reducing point count by ~4x.
+
+    Returns
+    -------
+    np.ndarray
+        ``(N, 3)`` float32 array of XYZ points in the camera frame.
+    """
+    h, w = depth.shape[:2]
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    v, u = np.mgrid[0:h:stride, 0:w:stride]
+    z = depth[0:h:stride, 0:w:stride].astype(np.float32)
+
+    valid = np.isfinite(z) & (z > 0)
+    z = z[valid]
+    u = u[valid].astype(np.float32)
+    v = v[valid].astype(np.float32)
+
+    x = (u - cx) * z / fx
+    y = (v - cy) * z / fy
+
+    return np.stack([x, y, z], axis=-1)

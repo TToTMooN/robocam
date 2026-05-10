@@ -150,9 +150,7 @@ def main() -> None:
         w, h = resolution_for_model(cam_name)
         logger.info("Opening {} ({}) at {}x{} @ {}fps", s, cam_name, w, h, args.fps)
         try:
-            cameras[s] = RealsenseCamera(
-                serial_number=s, resolution=(w, h), fps=args.fps, enable_depth=args.depth
-            )
+            cameras[s] = RealsenseCamera(serial_number=s, resolution=(w, h), fps=args.fps, enable_depth=args.depth)
         except Exception as e:
             logger.warning("Failed to open {}: {}", s, e)
 
