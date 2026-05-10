@@ -55,23 +55,29 @@ export LD_LIBRARY_PATH=/usr/local/zed/lib:$LD_LIBRARY_PATH
 
 The Lumos tracker isn't talked to directly — `xv_sdk` runs inside a docker container (ROS1 Noetic) and TCP-ships frames + pose to the host, where `LumosCamera` receives them. Three things have to be in place before `LumosCamera` will work.
 
-The upstream sources live under `/root/fastumi_driver/` (git-tracked).
+The upstream sources live under `~/fastumi_driver/` on this host (git-tracked). Adjust the paths below if you cloned elsewhere.
 
-**1. Install the udev rules so the host opens the tracker at mode 666 on plug-in.** Without this, `xv_sdk` fails with `LIBUSB_ERROR_ACCESS` and `lumos_stack up` times out waiting for the device namespace.
+**1. Install the udev rule so the host opens the tracker at mode 666 on plug-in.** Without this, `xv_sdk` fails with `LIBUSB_ERROR_ACCESS` and `lumos_stack up` times out waiting for the device namespace.
+
+The rule itself is one line — `SUBSYSTEM=="usb", ATTR{idVendor}=="040e", MODE="0666", GROUP="plugdev"` — matching XVisio's USB vendor ID.
 
 ```bash
-sudo cp /root/fastumi_driver/FastUMI_Hardware_SDK/xv/scripts/99-xvisio.rules \
+sudo cp ~/fastumi_driver/FastUMI_Hardware_SDK/xv/scripts/99-xvisio.rules \
         /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-# unplug + replug the tracker, then verify:
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+# unplug + replug the tracker, then verify (note: bus/device numbers
+# change every replug — the lsusb-derived path resolves them):
 ls -l $(lsusb | awk '/040e:/ {printf "/dev/bus/usb/%s/%s\n",$2,substr($4,1,3)}')
-# should show: crw-rw-rw-  (mode 666)
+# should show: crw-rw-rw- 1 root plugdev   (mode 666, group plugdev)
 ```
+
+This is one-time. Once installed, every replug fires the rule automatically — no per-plug `chmod` needed. If the verification still shows `crw-rw-r--`, the rule didn't match: confirm the file is in `/etc/udev/rules.d/` and the device VID matches `040e` (`lsusb | grep 040e`).
 
 **2. Build the `fastumi` docker image / container** (one-time):
 
 ```bash
-cd /root/fastumi_driver/fastumi-docker && sudo ./run.sh
+cd ~/fastumi_driver/fastumi-docker && sudo ./run.sh
 ```
 
 The first run also builds the image. The container uses `--rm`, so it lives only as long as that shell — leave it open, or drop `--rm` from `run.sh` if you want it persistent across sessions.
