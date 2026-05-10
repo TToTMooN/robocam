@@ -60,9 +60,38 @@ class Args:
     """Maximum points kept in the SLAM trail."""
 
 
-# xv_sdk publishes orientation as XYZW; viser uses WXYZ.
-def _xyzw_to_wxyz(q) -> Tuple[float, float, float, float]:
-    return float(q[3]), float(q[0]), float(q[1]), float(q[2])
+# xv_sdk's SLAM world frame is the optical-frame convention (X right,
+# Y down, Z forward). Viser's scene is X right, Y forward, Z up. We
+# rotate -90° about X to map between them: position (x, y, z) → (x, z, -y),
+# and the orientation quaternion is pre-multiplied by the same rotation.
+_SQRT_HALF = math.sqrt(0.5)
+_Q_XV2VISER_WXYZ = (_SQRT_HALF, -_SQRT_HALF, 0.0, 0.0)  # -90° about X (WXYZ)
+
+
+def _quat_mul_wxyz(
+    q1: Tuple[float, float, float, float],
+    q2: Tuple[float, float, float, float],
+) -> Tuple[float, float, float, float]:
+    """Hamilton product q1 ⊗ q2; both are WXYZ."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return (
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    )
+
+
+def _convert_position(pos) -> Tuple[float, float, float]:
+    return float(pos[0]), float(pos[2]), -float(pos[1])
+
+
+def _convert_orientation(ori_xyzw) -> Tuple[float, float, float, float]:
+    # XYZW → WXYZ, then rotate by Q_XV2VISER from the left.
+    q_xv_wxyz = (float(ori_xyzw[3]), float(ori_xyzw[0]),
+                 float(ori_xyzw[1]), float(ori_xyzw[2]))
+    return _quat_mul_wxyz(_Q_XV2VISER_WXYZ, q_xv_wxyz)
 
 
 def _is_finite_pos(pos) -> bool:
@@ -125,26 +154,36 @@ def main() -> None:
         color=(0, 200, 255),
     )
 
-    # Trail (recreated each tick because the spline geometry grows).
+    # Trail (recreated each tick because the geometry grows). We render as
+    # straight line segments + a point cloud of the raw samples — the spline
+    # version interpolated between samples and amplified SLAM jitter.
     trail_history: Deque[Tuple[float, float, float]] = deque(maxlen=args.trail_max)
-    trail_handle: Optional[viser.SplineCatmullRomHandle] = None
+    trail_lines: Optional[viser.LineSegmentsHandle] = None
+    trail_dots: Optional[viser.PointCloudHandle] = None
 
     image_handles: Dict[str, viser.ImageHandle] = {}
 
     # GUI panel.
     with server.gui.add_folder("Lumos"):
         gui_status = server.gui.add_text("status", "starting…", disabled=True)
+        gui_confidence = server.gui.add_text("SLAM confidence", "—", disabled=True)
+        gui_min_conf = server.gui.add_slider(
+            "min confidence", min=0.0, max=1.0, step=0.05, initial_value=0.0,
+        )
         gui_show_trail = server.gui.add_checkbox("show trail", True)
         gui_show_frustum = server.gui.add_checkbox("show frustum", True)
         gui_clear = server.gui.add_button("clear trail")
 
     @gui_clear.on_click
     def _on_clear(_event) -> None:
-        nonlocal trail_handle
+        nonlocal trail_lines, trail_dots
         trail_history.clear()
-        if trail_handle is not None:
-            trail_handle.remove()
-            trail_handle = None
+        if trail_lines is not None:
+            trail_lines.remove()
+            trail_lines = None
+        if trail_dots is not None:
+            trail_dots.remove()
+            trail_dots = None
 
     last_log_t = time.monotonic()
     frames_since_log = 0
@@ -160,31 +199,48 @@ def main() -> None:
 
             # ---- pose update -------------------------------------------------
             pose = (data.other_sensors or {}).get("pose")
+            confidence: Optional[float] = None
             if pose is not None:
                 pos = pose.get("position")
                 ori = pose.get("orientation")
+                confidence = pose.get("confidence")
                 if _is_finite_pos(pos) and ori is not None and len(ori) == 4:
-                    tup = (float(pos[0]), float(pos[1]), float(pos[2]))
-                    tracker_frame.position = tup
-                    tracker_frame.wxyz = _xyzw_to_wxyz(ori)
-                    tracker_frustum.position = tup
-                    tracker_frustum.wxyz = _xyzw_to_wxyz(ori)
-                    trail_history.append(tup)
+                    pos_v = _convert_position(pos)
+                    ori_v = _convert_orientation(ori)
+                    # The frustum is a child of /tracker, so its pose is
+                    # inherited from the parent — never touch its wxyz/position
+                    # directly or it'd be applied twice.
+                    tracker_frame.wxyz = ori_v
+                    if confidence is None or confidence >= gui_min_conf.value:
+                        tracker_frame.position = pos_v
+                        trail_history.append(pos_v)
+            gui_confidence.value = (
+                f"{confidence:.2f}" if confidence is not None else "—"
+            )
 
-            # ---- trail polyline ---------------------------------------------
-            if gui_show_trail.value and len(trail_history) >= 2:
+            # ---- trail polyline + dots --------------------------------------
+            if gui_show_trail.value and len(trail_history) >= 1:
                 pts = np.array(trail_history, dtype=np.float32)
-                if trail_handle is not None:
-                    trail_handle.remove()
-                trail_handle = scene.add_spline_catmull_rom(
-                    "/trail",
-                    points=pts,
-                    line_width=2.0,
-                    color=(0, 200, 200),
+                if trail_dots is not None:
+                    trail_dots.remove()
+                trail_dots = scene.add_point_cloud(
+                    "/trail/dots", points=pts, colors=(0, 255, 255),
+                    point_size=0.012, point_shape="circle",
                 )
-            elif not gui_show_trail.value and trail_handle is not None:
-                trail_handle.remove()
-                trail_handle = None
+                if len(pts) >= 2:
+                    # (N-1, 2, 3) — connect each consecutive pair as one segment.
+                    segs = np.stack([pts[:-1], pts[1:]], axis=1)
+                    if trail_lines is not None:
+                        trail_lines.remove()
+                    trail_lines = scene.add_line_segments(
+                        "/trail/lines", points=segs, colors=(0, 200, 200),
+                        line_width=2.0,
+                    )
+            elif not gui_show_trail.value:
+                if trail_lines is not None:
+                    trail_lines.remove(); trail_lines = None
+                if trail_dots is not None:
+                    trail_dots.remove(); trail_dots = None
 
             tracker_frustum.visible = gui_show_frustum.value
 

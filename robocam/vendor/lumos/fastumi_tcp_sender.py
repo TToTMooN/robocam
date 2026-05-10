@@ -60,6 +60,9 @@ def _pose_to_dict(msg):
     return {
         "position": [p.x, p.y, p.z],
         "orientation": [q.x, q.y, q.z, q.w],
+        # 0..1 — drops to 0 when SLAM init failed or relocalization in progress.
+        # Position values are unreliable when low.
+        "confidence": float(getattr(msg, "confidence", 0.0)),
     }
 
 
