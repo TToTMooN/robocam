@@ -15,7 +15,7 @@ dependencies = [
     "Pillow",
     "pyrealsense2",
     "pyzed",
-    "viser",
+    "viser>=1.0.27",
 ]
 
 [tool.flit.module]

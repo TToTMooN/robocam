@@ -29,6 +29,7 @@ pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyz
 | **RealSense** | `pyrealsense2` | No | Wheel bundles `librealsense`. Just install and go. |
 | **ZED** | `pyzed` | **Yes — ZED SDK required** | `pyzed` is only thin Python bindings. The runtime (`libsl_zed.so`, CUDA kernels, neural depth models) must be installed separately. |
 | **OpenCV** | `opencv-contrib-python` | No | Self-contained wheel. |
+| **Lumos** (FastUMI Pro) | none — TCP receiver | **Yes — docker stack + XVSDK + udev rules** | Frames arrive over TCP from `xv_sdk` running in a docker container. See [Lumos / FastUMI setup](#lumos--fastumi-setup). |
 
 ### ZED SDK setup
 
@@ -49,6 +50,86 @@ If you see `libsl_zed.so: cannot open shared object file`, the SDK is not instal
 ```bash
 export LD_LIBRARY_PATH=/usr/local/zed/lib:$LD_LIBRARY_PATH
 ```
+
+### Lumos / FastUMI setup
+
+The Lumos tracker isn't talked to directly — `xv_sdk` runs inside a docker container (ROS1 Noetic) and TCP-ships frames + pose to the host, where `LumosCamera` receives them. Three things have to be in place before `LumosCamera` will work.
+
+The upstream sources live under `~/fastumi_driver/` on this host (git-tracked). Adjust the paths below if you cloned elsewhere.
+
+**1. Install the udev rule so the host opens the tracker at mode 666 on plug-in.** Without this, `xv_sdk` fails with `LIBUSB_ERROR_ACCESS` and `lumos_stack up` times out waiting for the device namespace.
+
+The rule itself is one line — `SUBSYSTEM=="usb", ATTR{idVendor}=="040e", MODE="0666", GROUP="plugdev"` — matching XVisio's USB vendor ID.
+
+```bash
+sudo cp ~/fastumi_driver/fastumi-docker/scripts/99-xvisio.rules \
+        /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+# unplug + replug the tracker, then verify (note: bus/device numbers
+# change every replug — the lsusb-derived path resolves them):
+ls -l $(lsusb | awk '/040e:/ {printf "/dev/bus/usb/%s/%s\n",$2,substr($4,1,3)}')
+# should show: crw-rw-rw- 1 root plugdev   (mode 666, group plugdev)
+```
+
+This is one-time. Once installed, every replug fires the rule automatically — no per-plug `chmod` needed. If the verification still shows `crw-rw-r--`, the rule didn't match: confirm the file is in `/etc/udev/rules.d/` and the device VID matches `040e` (`lsusb | grep 040e`).
+
+**2. Build the `fastumi` docker image / container** (one-time):
+
+```bash
+cd ~/fastumi_driver/fastumi-docker && ./run.sh
+```
+
+The first run also builds the image. The container uses `--rm`, so it lives only as long as that shell — leave it open, or drop `--rm` from `run.sh` if you want it persistent across sessions.
+
+**3. Install the XVSDK `.deb` inside the container** (must be redone any time the container is recreated, since `/usr/lib` doesn't persist):
+
+```bash
+docker exec -u root fastumi bash -c \
+    "apt-get update && \
+     apt-get install -y dh-exec libcereal-dev libv4l-dev && \
+     dpkg -i /opt/fastumi_sdk/xv/sdk/20260312/XVSDK_focal_amd64.deb"
+```
+
+Without it, `xv_sdk` dies with `libxvsdk.so: cannot open shared object file`. To skip this every time, patch the docker image's entrypoint to call `setup_lumos` when `libxvsdk.so` is missing — see `~/fastumi_driver/fastumi-docker/scripts/entrypoint.sh`.
+
+After all three, bring up the stack and run a viewer:
+
+```bash
+# 2D cv2 viewer — image tiles + pose overlay + optional recording
+uv run scripts/view_lumos.py --bring-up
+
+# 3D web viewer (viser) — recommended for SLAM bring-up. Shows the
+# tracker pose as an oriented frame, the SLAM trajectory as a polyline,
+# and surfaces the SLAM confidence + a min-confidence gate in the GUI
+# so you can immediately see whether tracking is locked.
+uv run scripts/view_lumos_viser.py --bring-up
+# then open http://localhost:8080
+```
+
+See `robocam/drivers/lumos.py` (host-side receiver) and `robocam/drivers/lumos_stack.py` (docker / xv_sdk lifecycle) for the runtime knobs (all `FASTUMI_*` env vars).
+
+### Stream rates and USB bandwidth
+
+Measured on this hardware (Lumos on USB-2, Bus 03):
+
+| Stream | Source rate | Notes |
+|---|---|---|
+| `fisheye_left/right`, `left2/right2` | ~12 Hz | Firmware-capped — not tunable from xv_sdk. Designed for SLAM, paired with the 500 Hz IMU. |
+| `color_camera` | ~16 Hz | Lower than the 30 Hz nominal because of USB-2 |
+| `imu_sensor/data_raw` | ~500 Hz | Reaches `LumosCamera` at ~100 Hz (pose sender batches one envelope per 10 ms) |
+| `slam/pose`, `clamp/Data` | ~30 Hz | Latched into the 100 Hz pose envelope |
+
+**USB bandwidth caveat — USB-3 is required for stable SLAM.** On a USB-2 link (`lsusb -t` shows `480M` next to the tracker) two things go wrong:
+
+1. Enabling color saturates the bus and starves fisheye to ~1.6 Hz.
+2. Even with color off, fisheye frames arrive out-of-order under USB-2 pressure. `xv_sdk` logs `Last FE<...> host time stamp ... is greater than this frame` and rejects the non-monotonic frames, so SLAM `confidence` flaps between 0 and 1 and the pose is unusable. Check with `docker exec fastumi tail -50 /tmp/xv_sdk.log | grep -c 'host time stamp'` — a healthy run reports `0`.
+
+**Fix:** move the tracker to a USB-3 port. Check `lsusb -t` for a parent root hub at `5000M` or higher and replug there. Color and fisheye then coexist cleanly and SLAM stays locked.
+
+If USB-3 is genuinely unavailable, run `lumos_stack up --no-color` to free as much bandwidth as possible — but expect intermittent SLAM dropouts on USB-2 regardless.
+
+Measure rates yourself with `rostopic hz` inside the container, or with the receiver-side script in the PR description.
 
 ## Quick Start
 
