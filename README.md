@@ -86,11 +86,12 @@ The first run also builds the image. The container uses `--rm`, so it lives only
 
 ```bash
 docker exec -u root fastumi bash -c \
-    "apt-get install -y dh-exec libcereal-dev libv4l-dev && \
+    "apt-get update && \
+     apt-get install -y dh-exec libcereal-dev libv4l-dev && \
      dpkg -i /opt/fastumi_sdk/xv/sdk/20260312/XVSDK_focal_amd64.deb"
 ```
 
-Without it, `xv_sdk` dies with `libxvsdk.so: cannot open shared object file`.
+Without it, `xv_sdk` dies with `libxvsdk.so: cannot open shared object file`. To skip this every time, patch the docker image's entrypoint to call `setup_lumos` when `libxvsdk.so` is missing — see `~/fastumi_driver/fastumi-docker/scripts/entrypoint.sh`.
 
 After all three, bring up the stack and run a viewer:
 
@@ -99,6 +100,24 @@ uv run scripts/view_lumos.py --bring-up
 ```
 
 See `robocam/drivers/lumos.py` (host-side receiver) and `robocam/drivers/lumos_stack.py` (docker / xv_sdk lifecycle) for the runtime knobs (all `FASTUMI_*` env vars).
+
+### Stream rates and USB bandwidth
+
+Measured on this hardware (Lumos on USB-2, Bus 03):
+
+| Stream | Source rate | Notes |
+|---|---|---|
+| `fisheye_left/right`, `left2/right2` | ~12 Hz | Firmware-capped — not tunable from xv_sdk. Designed for SLAM, paired with the 500 Hz IMU. |
+| `color_camera` | ~16 Hz | Lower than the 30 Hz nominal because of USB-2 |
+| `imu_sensor/data_raw` | ~500 Hz | Reaches `LumosCamera` at ~100 Hz (pose sender batches one envelope per 10 ms) |
+| `slam/pose`, `clamp/Data` | ~30 Hz | Latched into the 100 Hz pose envelope |
+
+**USB bandwidth caveat:** on a USB-2 link (`lsusb -t` shows `480M` next to the tracker), enabling color saturates the bus and starves fisheye to ~1.6 Hz. Two options:
+
+- **Move the tracker to a USB-3 port.** Most laptops have both — check `lsusb -t` for a parent root hub at `5000M` or higher and replug there. Color and fisheye then coexist cleanly.
+- **Stay on USB-2 but pick one or the other:** `lumos_stack up --no-color` for full ~12 Hz fisheye, or accept color and let fisheye degrade.
+
+Measure rates yourself with `rostopic hz` inside the container, or with the receiver-side script in the PR description.
 
 ## Quick Start
 
