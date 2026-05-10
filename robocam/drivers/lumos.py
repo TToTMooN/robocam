@@ -242,14 +242,22 @@ class LumosCamera:
                     self._cv.notify_all()
 
     def _store_camera_info(self, key: str, header: Dict[str, Any]) -> None:
+        # All parsing/reshape lives in one try/except: a malformed R or P
+        # array used to raise out of this method, propagate through
+        # _image_recv_loop, and kill _image_server_loop's accept() loop
+        # (try/finally, no except) — losing the image stream permanently.
         try:
             K = np.array(header["K"], dtype=np.float64).reshape(3, 3)
             D = np.array(header.get("D", []), dtype=np.float64)
-        except (KeyError, ValueError) as e:
+            width = int(header.get("width", 0))
+            height = int(header.get("height", 0))
+            R_raw = header.get("R")
+            P_raw = header.get("P")
+            R = np.array(R_raw, dtype=np.float64).reshape(3, 3) if R_raw and np.any(R_raw) else None
+            P = np.array(P_raw, dtype=np.float64).reshape(3, 4) if P_raw and np.any(P_raw) else None
+        except (KeyError, ValueError, TypeError) as e:
             logger.warning("LumosCamera bad camera_info for {}: {}", key, e)
             return
-        width = int(header.get("width", 0))
-        height = int(header.get("height", 0))
         # xv_sdk publishes empty CameraInfo on fisheye topics (width=height=0,
         # K all zeros) — it doesn't expose those intrinsics over ROS. Skip
         # rather than expose misleading zero-K entries to consumers.
@@ -262,12 +270,10 @@ class LumosCamera:
             "height": height,
             "distortion_model": str(header.get("distortion_model", "")),
         }
-        R = header.get("R")
-        P = header.get("P")
-        if R and np.any(R):
-            info["R"] = np.array(R, dtype=np.float64).reshape(3, 3)
-        if P and np.any(P):
-            info["P"] = np.array(P, dtype=np.float64).reshape(3, 4)
+        if R is not None:
+            info["R"] = R
+        if P is not None:
+            info["P"] = P
         with self._cv:
             self._intrinsics[key] = info
 
