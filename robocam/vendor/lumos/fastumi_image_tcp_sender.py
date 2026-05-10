@@ -233,18 +233,30 @@ def main():
     def make_info_cb(out_topic):
         # CameraInfo is effectively static for a given session, but we update
         # the cache every time so a sender restart picks up any rebinding.
-        # If DOWNSCALE is active, K (fx, fy, cx, cy) and image size are scaled
-        # to match what the receiver actually sees in image packets.
+        # If DOWNSCALE is active, K, P, and image size are scaled to match
+        # what the receiver actually sees in image packets. P's stereo Tx/Ty
+        # (P[3], P[7]) scale with focal length too — they're zero on the
+        # monocular xv_sdk color stream but we scale them anyway so this is
+        # correct for any future stereo CameraInfo.
         def cb(msg):
             try:
                 K = list(msg.K)
+                P = list(msg.P)
                 w, h = int(msg.width), int(msg.height)
                 if DOWNSCALE != 1.0 and DOWNSCALE > 0:
                     s = DOWNSCALE
+                    # K row-major 3x3: scale fx, cx, fy, cy (skew K[1] left
+                    # alone to match prior behavior; xv_sdk publishes 0 anyway).
                     K = [
                         K[0] * s, K[1],     K[2] * s,
                         K[3],     K[4] * s, K[5] * s,
                         K[6],     K[7],     K[8],
+                    ]
+                    # P row-major 3x4: scale fx', cx', Tx, fy', cy', Ty.
+                    P = [
+                        P[0] * s, P[1],     P[2] * s, P[3] * s,
+                        P[4],     P[5] * s, P[6] * s, P[7] * s,
+                        P[8],     P[9],     P[10],    P[11],
                     ]
                     w = int(w * s)
                     h = int(h * s)
@@ -254,7 +266,7 @@ def main():
                     "K": K,
                     "D": list(msg.D),
                     "R": list(msg.R),
-                    "P": list(msg.P),
+                    "P": P,
                     "distortion_model": msg.distortion_model or "",
                     "width": w,
                     "height": h,
