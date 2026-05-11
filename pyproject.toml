@@ -15,8 +15,10 @@ dependencies = [
     "Pillow",
     "pyrealsense2",
     "pyzed",
-    "viser>=1.0.27",
 ]
+
+[project.optional-dependencies]
+viser = ["viser"]
 
 [tool.flit.module]
 name = "robocam"
@@ -27,6 +29,9 @@ name = "robocam"
 # the downstream project must configure pyzed in its own [tool.uv.sources].
 [tool.uv.sources]
 pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+# Pin viser to the 1.0.27 tag commit (a couple commits behind upstream HEAD)
+# so we get a known-good revision rather than tracking main.
+viser = { git = "https://github.com/nerfstudio-project/viser.git", rev = "eac22c5336d8777029c19830be5c9b41f1b7a008" }
 
 [tool.ruff]
 line-length = 119

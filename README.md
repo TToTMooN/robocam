@@ -103,6 +103,8 @@ uv run scripts/view_lumos.py --bring-up
 # tracker pose as an oriented frame, the SLAM trajectory as a polyline,
 # and surfaces the SLAM confidence + a min-confidence gate in the GUI
 # so you can immediately see whether tracking is locked.
+# viser is an optional extra — install it first:
+uv sync --extra viser
 uv run scripts/view_lumos_viser.py --bring-up
 # then open http://localhost:8080
 ```
