@@ -14,11 +14,15 @@ dependencies = [
     "opencv-contrib-python",
     "Pillow",
     "pyrealsense2",
-    "pyzed",
 ]
 
 [project.optional-dependencies]
 viser = ["viser"]
+# pyzed is opt-in: the Stereolabs wheel requires numpy>=2, which conflicts
+# with consumers pinned to numpy<2 (e.g. ROS2 Humble). Downstreams that
+# actually use ZED cameras should request `robocam[zed]` and either rely on
+# the pyzed source below or pin their own.
+zed = ["pyzed"]
 
 [tool.flit.module]
 name = "robocam"
