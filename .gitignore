@@ -25,3 +25,11 @@ Thumbs.db
 
 # Recordings
 recordings/
+
+# Insta360 native build artifact (rebuild: bash native/build.sh)
+# Kept OUTSIDE robocam/ on purpose: flit packages the whole module directory
+# and never reads .gitignore, so anything under robocam/ lands in the wheel.
+_native/
+
+# Insta360 CameraSDK drop-in (proprietary, never committed) - same reason
+vendor/insta360_sdk/

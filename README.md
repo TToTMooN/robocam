@@ -30,6 +30,7 @@ pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyz
 | **ZED** | `pyzed` | **Yes — ZED SDK required** | `pyzed` is only thin Python bindings. The runtime (`libsl_zed.so`, CUDA kernels, neural depth models) must be installed separately. |
 | **OpenCV** | `opencv-contrib-python` | No | Self-contained wheel. |
 | **Lumos** (FastUMI Pro) | none — TCP receiver | **Yes — docker stack + XVSDK + udev rules** | Frames arrive over TCP from `xv_sdk` running in a docker container. See [Lumos / FastUMI setup](#lumos--fastumi-setup). |
+| **Insta360** (X5) | none - ctypes wrapper | **Yes - CameraSDK + a native build** | Proprietary SDK, not vendored. Build `native/build.sh` once per environment. See [Insta360 SDK setup](#insta360-sdk-setup). |
 
 ### ZED SDK setup
 
@@ -133,6 +134,27 @@ If USB-3 is genuinely unavailable, run `lumos_stack up --no-color` to free as mu
 
 Measure rates yourself with `rostopic hz` inside the container, or with the receiver-side script in the PR description.
 
+### Insta360 SDK setup
+
+`Insta360Camera` talks to the camera through a small native shim (`native/insta_source.cpp`) that links the proprietary Insta360 CameraSDK. Unlike the other drivers there is an SDK to obtain and a shim to compile, plus several camera-side settings that fail in confusing ways when wrong.
+
+**Full instructions, troubleshooting and known dead ends: [docs/insta360_setup.md](docs/insta360_setup.md).** The short version:
+
+1. Apply for the CameraSDK at [insta360.com/sdk/home](https://www.insta360.com/sdk/home) (needs a build posted after 2025-04-23) and lay it out as `include/camera/`, `include/stream/`, `lib/libCameraSDK.so`.
+2. On the camera: **dual-lens mode**, **USB Mode = Android** (not U-Disk, which is the mass-storage default), **Auto Power Off = Never** (USB does not suppress the sleep timer).
+3. Install the udev rules for USB permissions and autosuspend.
+4. Build the shim from inside the environment you will run in:
+
+```bash
+INSTA360_SDK_ROOT=/path/to/insta360_sdk bash native/build.sh
+```
+
+**Build it once per environment, and never copy the `.so` between environments.** `build.sh` links openh264, swscale and avutil out of `$CONDA_PREFIX` (override with `$CODEC_PREFIX`), and openh264 sonames differ across environments - a binary built elsewhere fails to load at import time.
+
+The output lands in `_native/` at the repo root, and the SDK drop-in belongs outside `robocam/` too. Both are deliberate: flit packages the entire `robocam/` module directory and **does not consult `.gitignore`**, so anything placed under it gets baked into a wheel - which for a proprietary SDK or an environment-locked binary is exactly the wrong outcome. Keeping them at the repo root means neither can be packaged, and it makes this driver source/editable-install only. That is the honest constraint: no prebuilt binary can be valid for an arbitrary environment, so a wheel that carried one would only fail later and more confusingly.
+
+`image_transfer_time_offset_ms` is resolution-dependent and measured, not guessed: 86 ms at 1920x960 and 130 ms at 2656x1328, obtained by the UMI QR-clock method. Re-measure it if you change resolution or lens.
+
 ## Quick Start
 
 ### Read frames from a RealSense camera
@@ -224,6 +246,22 @@ Class method: `ZedCamera.check_available_cameras()`
 | `resolution` | `(int, int)` | `(640, 480)` | `(width, height)` |
 | `fps` | `int` | `30` | Target frame rate |
 | `image_transfer_time_offset` | `int` | `80` | ms subtracted from wall-clock time |
+
+#### `robocam.drivers.insta360.Insta360Camera`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `serial` | `str` | `""` | SDK serial. `""` = first discovered camera |
+| `resolution` | `str` | `"1920x960"` | `3840x1920`, `2880x2880`, `2560x1280`, `2304x1152`, `1920x960`, `1440x720` |
+| `bitrate` | `int` | `524288` | Encoder bitrate in bits/s |
+| `live_view_mode` | `bool` | `True` | SDK live-view flow; unlocks the X5 preview resolution |
+| `lens` | `str` | `"front"` | `full`, `front` (right half), or `back` |
+| `image_transfer_time_offset_ms` | `float` | `86.0` | ms subtracted from the device timestamp |
+| `read_timeout_s` | `float` | `5.0` | `read()` raises `TimeoutError` after this long |
+| `service_port` | `int` | `0` | SDK service port; `0` = default. Distinct per camera in one process |
+| `name` | `str \| None` | `None` | Human label |
+
+Needs the native shim built first - see [Insta360 SDK setup](#insta360-sdk-setup). `read_calibration_data_intrinsics()` raises `NotImplementedError`: Insta360 intrinsics are per-unit and resolution-dependent, so they belong in a downstream camera registry rather than the SDK.
 
 #### `robocam.camera.DummyCamera`
 
@@ -326,6 +364,9 @@ Different camera SDKs have fundamentally different threading constraints:
 | **ZED** (`sl.Camera.grab()`) | Yes | `CaptureThread` — one daemon thread per camera |
 | **RealSense** (`pipeline.wait_for_frames()`) | **No — main thread only** | Poll sequentially on the main thread |
 | **OpenCV** (`cv2.VideoCapture.read()`) | Yes (per device) | `CaptureThread` or main-thread polling |
+| **Insta360** (`Insta360Camera.read()`) | Yes, but **one reader per camera** | `CaptureThread` - one daemon thread per camera |
+
+**Insta360 single-reader constraint.** The native layer holds one latest-frame slot and one `last_read_seq` per camera handle, so two threads reading the *same* camera steal frames from each other instead of each seeing every frame. One `CaptureThread` per camera is correct; fanning several consumers off one camera is not - give them a `FrameBuffer` instead. Separately, two cameras in one process need distinct `service_port` values, and two processes cannot share the camera fleet at all.
 
 ### RealSense main-thread constraint
 
