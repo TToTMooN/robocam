@@ -121,7 +121,53 @@ A killed process leaves the camera's USB interface in `LIBUSB_ERROR_BUSY`, where
 
 Only one SDK session may hold a camera at a time, so stop any ROS2 Insta360 driver first.
 
-## 6. Multiple cameras
+## 6. Stream resolutions and lenses
+
+`Insta360Camera(resolution=...)` accepts exactly three values.
+Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_insta360_resolutions.py`.
+
+| `resolution` | Streams at | `image_transfer_time_offset_ms` |
+|---|---|---|
+| `1920x960` (default) | 1920x960 | **86**, QR-measured |
+| `2560x1280` | 2560x1280 | |
+| `3840x1920` | 3840x1920 | |
+
+A blank offset means never measured, not zero.
+Those two resolutions currently inherit the 1920x960 default, which is wrong for them; see [Latency](#8-latency-and-the-image_transfer_time_offset_ms-constant).
+
+Anything else raises `ValueError`.
+The SDK's `VideoResolution` enum offers more, and the shim used to map six of them, but only these three stream on an X5.
+
+**The other three failed in ways the camera does not report.**
+`1440x720` and `2304x1152` are rejected as a main stream, and instead of failing the camera silently keeps whatever it streamed last.
+That previous resolution persists across processes and power cycles, so the size you get depends on which session ran before: with the camera last at 1920x960 a `1440x720` request delivers 1920x960, and last at 2560x1280 the same request delivers 2560x1280.
+
+`2880x2880` is worse.
+`StartLiveStreaming` rejects it, but only after `SetVideoCaptureParams` has already committed it to the camera.
+That write drops the X5 out of Android USB mode and rewrites its normal-video recording resolution.
+Recovery needs the on-camera settings menu; a replug does not do it, and the next SDK session fails with `no camera discovered` until you fix it by hand.
+
+Re-check these on new firmware with:
+
+```bash
+uv run scripts/diagnostics/test_insta360_resolutions.py --include-unsupported
+```
+
+That deliberately excludes `2880x2880`.
+Name it explicitly if you want to re-confirm it, and expect to walk to the camera afterwards.
+
+**Resolutions are always the full dual-fisheye frame size.**
+`lens` selects half of it at read time, so `lens="front"` at `3840x1920` returns 1920x1920.
+
+| `lens` | Returns | Verified |
+|---|---|---|
+| `full` | the whole dual-fisheye frame | yes |
+| `front` | right half | yes, matches the full frame's right half |
+| `back` | left half | yes, matches the full frame's left half |
+
+All three work at all three resolutions.
+
+## 7. Multiple cameras
 
 ```bash
 uv run scripts/view_insta360.py --serials SERIAL_A,SERIAL_B
@@ -137,7 +183,7 @@ Occasional decode errors are normal.
 A corrupted access unit self-heals at the next IDR, and a dropped frame simply means the latest-frame slot is re-read.
 A handful per camera per minute is healthy; hundreds means cabling.
 
-## 7. Latency and the `image_transfer_time_offset_ms` constant
+## 8. Latency and the `image_transfer_time_offset_ms` constant
 
 `CameraData.timestamp` is capture-side, not arrival-side.
 The shim stamps each frame from the SDK's per-access-unit device timestamp, maps it to host `CLOCK_REALTIME` using the minimum observed delay over the first ~90 access units, and the driver then subtracts `image_transfer_time_offset_ms`.
@@ -148,6 +194,10 @@ Unlike the other robocam drivers' transfer offsets, this one is measured rather 
 |---|---|
 | 1920x960 (default, via live-view mode) | **86** |
 | 2656x1328 (X5 plain-flow default) | **130** |
+
+Those are the only two ever measured.
+`2560x1280` and `3840x1920` stream correctly but have no measured offset, so they currently inherit the 1920x960 default and their timestamps are wrong by the difference in the camera's encode buffer.
+Given the 44 ms spread between the two rows above, expect that error to be tens of milliseconds, not single digits.
 
 The 44 ms difference is the camera's own encode buffer, which scales with frame size.
 That is why 1920x960 is the default here despite being lower resolution.
@@ -166,6 +216,8 @@ A fresh anchor is taken at every open.
 | `lsusb` shows `070a:4027`, no `/dev/insta` | Camera is in the wrong USB mode. Set USB Mode to Android; it should then enumerate as `2e1a:0002`. |
 | `FileNotFoundError` naming `_native/libinsta_source.so` | Shim not built in this environment. Run `native/build.sh`. |
 | `OSError: libopenh264.so.N: cannot open shared object file` | The shim was built against a different environment. Rebuild it in this one. |
+| Frames are not the size requested | Only `1920x960`, `2560x1280` and `3840x1920` stream on an X5. The driver raises on anything else; if you are on an older build that did not, check `get_camera_info()["resolution"]`, which reports the delivered size. |
+| `no camera discovered` right after a failed open at a high resolution | A `2880x2880` attempt reset the camera's USB Mode. Set it back to Android on the camera; a replug alone does not fix it. |
 | `insta_source open failed` | Another SDK session holds the camera (a ROS2 driver, or a previous run that did not exit cleanly), or the camera is not in Android mode. |
 | `LIBUSB_ERROR_BUSY`, camera missing from discovery | A previous process was killed without reaching `stop()`. Physically replug the camera. |
 | Stream stops partway through a session | Auto Power Off, which USB does not suppress. Set it to Never. Also check the camera screen: if it powered off with a temperature warning, see thermal below. |
@@ -182,6 +234,8 @@ Any drop is therefore permanent until the process is restarted.
 Verified not to work, recorded so nobody spends a day on them again.
 
 - **`using_lrv` / the low-res proxy stream** is a genuine no-op on X5 firmware 1.1.22. It still delivers 2656x1328.
+- **`2880x2880` cannot be streamed, and trying resets the camera.** `StartLiveStreaming` rejects it only after `SetVideoCaptureParams` has committed it, which drops the X5 out of Android USB mode and rewrites its normal-video recording resolution. This is the same failure shape as `SetActiveSensor` below. Removed from the shim's resolution map; see [Stream resolutions and lenses](#6-stream-resolutions-and-lenses).
+- **`1440x720` and `2304x1152` are rejected as a main stream without saying so.** The camera keeps its previous live-stream resolution instead, which persists across processes and power cycles, so the delivered size depends on which session ran last. Both removed from the map; the driver now raises on them.
 - **`SetActiveSensor` is actively harmful on the X5.** It instantly drops the USB session, the SDK times out after ~13 s and then returns a bogus success, and the camera resets out of Android USB mode. Recovery needs re-selecting Android mode and a replug. Single-lens encode is not reachable camera-side; crop downstream instead, which is what the `lens` parameter does.
 - **The requested bitrate is ignored.** The X5 delivers ~8.4 Mbps regardless of what `bitrate` is set to.
 - **openh264's 1-frame output hold cannot be removed** from the stream side. Per-access-unit `FlushFrame` reaches zero lag but corrupts reference management, and SPS surgery does not move it. It is structural for High profile. Only patching openh264 itself would help.
