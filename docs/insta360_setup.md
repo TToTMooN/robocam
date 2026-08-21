@@ -156,6 +156,16 @@ This section is why it looks like that.
 `Insta360Camera(resolution=...)` accepts `1920x960`, `2560x1280` or `3840x1920`, and raises `ValueError` on anything else.
 The SDK's `VideoResolution` enum offers more, and the shim used to map six of them, but only these three stream on an X5.
 
+**What the vendor says, and why we test anyway.**
+Insta360's developer [integration guide](https://onlinemanual.insta360.com/developer/en-us/resource/integration) states that "the X5 and X4 preview stream resolution is fixed and cannot be adjusted", while other models "require preview resolution settings before streaming".
+So officially none of these three are settable, and the fact that they are is down to the live-view flow in `ins_open_impl`, which is an undocumented workaround.
+Treat it as such: a firmware update could remove it, and the diagnostic below is how you would find out.
+The official [Desktop-CameraSDK-Cpp](https://github.com/Insta360Develop/Desktop-CameraSDK-Cpp) README recommends 1920x960 for preview, which is why it is the default here.
+
+The same guide explains the floor: "the SDK only supports preset resolutions, frame rates, and interval times available on the camera screen."
+The three that work are X5 screen presets.
+The `VideoResolution` enum is a flat list across every Insta360 model with no per-model annotation, so it is not a capability list for any one camera, and the only way to know what an X5 accepts is to ask an X5.
+
 **1920x960 is a hard floor.**
 The SDK's enum carries five smaller 2:1 dual-fisheye resolutions - 1024x512, 960x480, 720x360, 640x320 and 480x240 - and none of them stream on an X5.
 All five were mapped and tested on 2026-08-21, and all five are rejected exactly the way `1440x720` is, so there is no cheaper stream to be had below the default.
@@ -165,6 +175,11 @@ None of them reset the camera, unlike `2880x2880`.
 **The rejected resolutions fail in ways the camera does not report.**
 `1440x720`, `2304x1152` and every sub-1920x960 candidate are rejected as a main stream, and instead of failing the camera silently keeps whatever it streamed last.
 That previous resolution persists across processes and power cycles, so the size you get depends on which session ran before: with the camera last at 1920x960 a `1440x720` request delivers 1920x960, and last at 2560x1280 the same request delivers 2560x1280.
+
+`2304x1152` deserves a note, because other drivers list it as working.
+No `RES_2304_*` value exists in the enum, so it was mapped to `RES_1152_1152P30` on the reading that two 1152x1152 fisheyes sit side by side.
+The [ai4ce ROS driver](https://github.com/ai4ce/insta360_ros_driver) that this mapping came from lists 2304x1152 among its available resolutions, but states it was verified on the X2 and X3.
+Under the camera-screen-preset rule above, a preset on an X3 need not be one on an X5, so there is no contradiction: it is simply not an X5 resolution.
 
 `2880x2880` is worse.
 `StartLiveStreaming` rejects it, but only after `SetVideoCaptureParams` has already committed it to the camera.
