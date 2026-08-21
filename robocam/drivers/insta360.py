@@ -51,9 +51,35 @@ _NATIVE = Path(__file__).resolve().parents[2] / "_native" / "libinsta_source.so"
 
 _LENS_CODE = {"full": 0, "front": 1, "back": 2}
 
-# Largest frame the X5 can deliver; the buffer is regrown if a config
-# somehow negotiates something bigger.
-_MAX_FRAME_BYTES = 2656 * 1328 * 3
+# The resolutions an X5 actually streams, verified against hardware on
+# 2026-08-21 (see scripts/diagnostics/probe_insta360_resolutions.py).
+#
+# The SDK's VideoResolution enum offers more than this, and the native shim
+# used to map six of them. Three had to go:
+#
+#   1440x720, 2304x1152  The camera rejects them as a main stream and silently
+#                        keeps whatever it streamed last, so the delivered size
+#                        depends on which session ran before and persists across
+#                        processes and power cycles. Verified: with the camera
+#                        last at 1920x960 a 1440x720 request yields 1920x960;
+#                        last at 2560x1280 the same request yields 2560x1280.
+#                        Since get_camera_info() echoed the request, a recording
+#                        would claim a resolution it never captured.
+#   2880x2880            StartLiveStreaming rejects it - but only AFTER
+#                        SetVideoCaptureParams has committed it to the camera,
+#                        which drops the X5 out of Android USB mode and
+#                        rewrites its normal-video resolution. Recovering needs
+#                        physical access to the camera's settings menu; a
+#                        replug does not do it.
+#
+# Rejecting them here rather than in the shim keeps the check in the layer that
+# can be fixed without a per-environment rebuild.
+_SUPPORTED_RESOLUTIONS = ("1920x960", "2560x1280", "3840x1920")
+
+# Largest frame the X5 can deliver (3840x1920 RGB24). The buffer is regrown if
+# a config somehow negotiates something bigger, at the cost of one dropped
+# frame, so it is sized for the real maximum rather than the default.
+_MAX_FRAME_BYTES = 3840 * 1920 * 3
 
 
 def _load_native() -> ctypes.CDLL:
@@ -108,16 +134,20 @@ class Insta360Camera:
 
     The default configuration is the low-latency one: 1920x960 through the
     live-view unlock, front lens only, eps = 86 ms. Re-measure
-    ``image_transfer_time_offset_ms`` after changing resolution or lens - it
-    is resolution-dependent (86 ms at 1920x960, 130 ms at 2656x1328).
+    ``image_transfer_time_offset_ms`` after changing resolution - it is
+    resolution-dependent (86 ms at 1920x960, 130 ms at 2656x1328), and the two
+    larger resolutions have no measured value yet. ``lens`` does not affect it:
+    the stamp is assigned before the crop, which happens at read time.
 
     Parameters
     ----------
     serial : str
         SDK serial number. Empty picks the first discovered camera.
     resolution : str
-        Requested stream resolution. On the X5 this is only honored with
-        ``live_view_mode``.
+        Stream resolution: ``1920x960``, ``2560x1280`` or ``3840x1920``.
+        Anything else raises. On the X5 this is only honored with
+        ``live_view_mode``. Always the full dual-fisheye frame size - a
+        single-lens ``lens`` still selects half of it.
     bitrate : int
         Encoder bitrate in bits/s.
     live_view_mode : bool
@@ -126,7 +156,9 @@ class Insta360Camera:
         Which lens to return: ``full``, ``front`` (right half), or ``back``.
     image_transfer_time_offset_ms : float
         Milliseconds subtracted from the device timestamp to approximate true
-        capture time. QR-calibrated for this configuration.
+        capture time. The default is QR-calibrated for 1920x960 ONLY; the
+        other two resolutions have no measured value yet, so timestamps there
+        are off by the difference in the camera's encode buffer.
     read_timeout_s : float
         ``read()`` raises :class:`TimeoutError` after this long with no frame.
     service_port : int
@@ -152,6 +184,7 @@ class Insta360Camera:
     _lib: Optional[ctypes.CDLL] = field(init=False, repr=False, default=None)
     _handle: Optional[ctypes.c_void_p] = field(init=False, repr=False, default=None)
     _buf: Optional[np.ndarray] = field(init=False, repr=False, default=None)
+    _actual_resolution: Optional[str] = field(init=False, repr=False, default=None)
 
     def __repr__(self) -> str:
         id_str = self.serial or "first-discovered"
@@ -160,6 +193,13 @@ class Insta360Camera:
     def __post_init__(self) -> None:
         if self.lens not in _LENS_CODE:
             raise ValueError(f"lens must be one of {sorted(_LENS_CODE)}, got {self.lens!r}")
+        if self.resolution not in _SUPPORTED_RESOLUTIONS:
+            raise ValueError(
+                f"resolution must be one of {list(_SUPPORTED_RESOLUTIONS)}, got "
+                f"{self.resolution!r}. The shim falls back to 1920x960 on an "
+                f"unrecognised string, so an unchecked typo would stream a "
+                f"different resolution than the one recorded."
+            )
         self._lib = _load_native()
         err = ctypes.create_string_buffer(256)
         handle = self._lib.ins_open(
@@ -205,6 +245,10 @@ class Insta360Camera:
                 # the input untouched when it is already contiguous) would
                 # alias into a buffer that is about to be overwritten.
                 rgb = self._buf[:n].reshape(h.value, w.value, 3).copy()
+                # What the camera actually sent, which is not always what was
+                # asked for; get_camera_info() reports this, not the request.
+                full_w = w.value if self.lens == "full" else w.value * 2
+                self._actual_resolution = f"{full_w}x{h.value}"
                 ts_ms = stamp_ns.value / 1e6 - self.image_transfer_time_offset_ms
                 return CameraData(images={"rgb": rgb}, timestamp=ts_ms)
             if n == -1:  # buffer too small (unexpected resolution); regrow
@@ -220,7 +264,8 @@ class Insta360Camera:
         info: Dict[str, Any] = {
             "camera_type": self.camera_type,
             "serial": self.serial or "(first discovered)",
-            "resolution": self.resolution,
+            "resolution": self._actual_resolution or self.resolution,
+            "requested_resolution": self.resolution,
             "lens": self.lens,
             "live_view_mode": self.live_view_mode,
             "image_transfer_time_offset_ms": self.image_transfer_time_offset_ms,

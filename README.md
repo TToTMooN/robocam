@@ -153,7 +153,7 @@ INSTA360_SDK_ROOT=/path/to/insta360_sdk bash native/build.sh
 
 The output lands in `_native/` at the repo root, and the SDK drop-in belongs outside `robocam/` too. Both are deliberate: flit packages the entire `robocam/` module directory and **does not consult `.gitignore`**, so anything placed under it gets baked into a wheel - which for a proprietary SDK or an environment-locked binary is exactly the wrong outcome. Keeping them at the repo root means neither can be packaged, and it makes this driver source/editable-install only. That is the honest constraint: no prebuilt binary can be valid for an arbitrary environment, so a wheel that carried one would only fail later and more confusingly.
 
-`image_transfer_time_offset_ms` is resolution-dependent and measured, not guessed: 86 ms at 1920x960 and 130 ms at 2656x1328, obtained by the UMI QR-clock method. Re-measure it if you change resolution or lens.
+`image_transfer_time_offset_ms` is resolution-dependent and measured, not guessed: 86 ms at 1920x960 and 130 ms at 2656x1328, obtained by the UMI QR-clock method. Re-measure it if you change resolution; `lens` does not affect it, since the stamp is assigned before the crop.
 
 ## Quick Start
 
@@ -252,14 +252,18 @@ Class method: `ZedCamera.check_available_cameras()`
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `serial` | `str` | `""` | SDK serial. `""` = first discovered camera |
-| `resolution` | `str` | `"1920x960"` | `3840x1920`, `2880x2880`, `2560x1280`, `2304x1152`, `1920x960`, `1440x720` |
+| `resolution` | `str` | `"1920x960"` | `1920x960`, `2560x1280`, `3840x1920`. Anything else raises |
 | `bitrate` | `int` | `524288` | Encoder bitrate in bits/s |
 | `live_view_mode` | `bool` | `True` | SDK live-view flow; unlocks the X5 preview resolution |
 | `lens` | `str` | `"front"` | `full`, `front` (right half), or `back` |
-| `image_transfer_time_offset_ms` | `float` | `86.0` | ms subtracted from the device timestamp |
+| `image_transfer_time_offset_ms` | `float` | `86.0` | ms subtracted from the device timestamp. Measured at `1920x960` only |
 | `read_timeout_s` | `float` | `5.0` | `read()` raises `TimeoutError` after this long |
 | `service_port` | `int` | `0` | SDK service port; `0` = default. Distinct per camera in one process |
 | `name` | `str \| None` | `None` | Human label |
+
+Resolutions and lens crops verified against an Insta360 X5 on 2026-08-21 (`scripts/diagnostics/test_insta360_resolutions.py`).
+The SDK's enum offers more resolutions, but only these three stream on an X5, and the rest fail silently or reset the camera - see [Stream resolutions and lenses](docs/insta360_setup.md#6-stream-resolutions-and-lenses).
+`resolution` is always the full dual-fisheye frame size; `lens` selects half of it, so `front` at `3840x1920` returns 1920x1920.
 
 Needs the native shim built first - see [Insta360 SDK setup](#insta360-sdk-setup). `read_calibration_data_intrinsics()` raises `NotImplementedError`: Insta360 intrinsics are per-unit and resolution-dependent, so they belong in a downstream camera registry rather than the SDK.
 
