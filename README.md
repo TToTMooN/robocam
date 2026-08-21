@@ -153,7 +153,7 @@ INSTA360_SDK_ROOT=/path/to/insta360_sdk bash native/build.sh
 
 The output lands in `_native/` at the repo root, and the SDK drop-in belongs outside `robocam/` too. Both are deliberate: flit packages the entire `robocam/` module directory and **does not consult `.gitignore`**, so anything placed under it gets baked into a wheel - which for a proprietary SDK or an environment-locked binary is exactly the wrong outcome. Keeping them at the repo root means neither can be packaged, and it makes this driver source/editable-install only. That is the honest constraint: no prebuilt binary can be valid for an arbitrary environment, so a wheel that carried one would only fail later and more confusingly.
 
-`image_transfer_time_offset_ms` is resolution-dependent and measured, not guessed: 86 ms at 1920x960 and 130 ms at 2656x1328, obtained by the UMI QR-clock method. Re-measure it if you change resolution or lens.
+`image_transfer_time_offset_ms` is resolution-dependent and measured, not guessed: 86 ms at 1920x960 and 130 ms at 2656x1328, obtained by the UMI QR-clock method. Re-measure it if you change resolution; `lens` does not affect it, since the stamp is assigned before the crop.
 
 ## Quick Start
 

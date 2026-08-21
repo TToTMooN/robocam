@@ -134,9 +134,10 @@ class Insta360Camera:
 
     The default configuration is the low-latency one: 1920x960 through the
     live-view unlock, front lens only, eps = 86 ms. Re-measure
-    ``image_transfer_time_offset_ms`` after changing resolution or lens - it
-    is resolution-dependent (86 ms at 1920x960, 130 ms at 2656x1328), and the
-    two larger resolutions have no measured value yet.
+    ``image_transfer_time_offset_ms`` after changing resolution - it is
+    resolution-dependent (86 ms at 1920x960, 130 ms at 2656x1328), and the two
+    larger resolutions have no measured value yet. ``lens`` does not affect it:
+    the stamp is assigned before the crop, which happens at read time.
 
     Parameters
     ----------

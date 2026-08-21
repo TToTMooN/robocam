@@ -214,8 +214,10 @@ Given the 44 ms spread between the two rows above, expect that error to be tens 
 The 44 ms difference is the camera's own encode buffer, which scales with frame size.
 That is why 1920x960 is the default here despite being lower resolution.
 
-**Re-measure after any change to resolution or lens.**
-The constant is per-configuration.
+**Re-measure after any change to resolution. Changing `lens` does not affect it.**
+The stamp is assigned in `OnVideoData` from the SDK's per-AU device timestamp, before decode and before the mutex is taken; the lens crop happens later in `ins_read`, on the reader thread, and never touches it.
+Measured across 120 frames per lens at both 1920x960 and 3840x1920, the median stamp lag spread between `full`, `front` and `back` was 0.9 ms and 1.4 ms against a per-lens standard deviation of 5 ms and 13 ms, with the ordering reversing between the two resolutions.
+That is noise, not an effect.
 The measurement procedure lives in the `portable_data_collection` repo, in `docs/camera_latency_check.md`, alongside `scripts/calibrate_camera_latency_ros.py`.
 
 Long sessions drift: device-versus-host crystal drift runs on the order of 10-50 ppm, so tens of ms per hour.
