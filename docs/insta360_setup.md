@@ -6,6 +6,31 @@ This driver talks to the camera through Insta360's proprietary CameraSDK via a s
 
 The [Troubleshooting](#troubleshooting) and [Dead ends](#dead-ends) sections are the parts worth reading before you start, not after.
 
+## Supported configurations
+
+Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_insta360_resolutions.py`.
+
+| `resolution` | `lens="full"` | `lens="front"` | `lens="back"` | `image_transfer_time_offset_ms` |
+|---|:---:|:---:|:---:|---|
+| `1920x960` (default) | Y | Y | Y | **86** |
+| `2560x1280` | Y | Y | Y | |
+| `3840x1920` | Y | Y | Y | |
+| `1440x720` | N | N | N | |
+| `2304x1152` | N | N | N | |
+| `2880x2880` | N | N | N | |
+
+Reading this table:
+
+- **N across a whole row means the resolution never streams**, not that the lens is unavailable.
+  The driver raises `ValueError` on those three.
+  Both failure modes are silent on the camera's side and worth knowing before you hit one: see [Stream resolutions and lenses](#6-stream-resolutions-and-lenses).
+  `2880x2880` in particular resets the camera and needs physical access to recover.
+- **A blank offset means never measured, not zero.**
+  Only `1920x960` has a measured value, taken at `lens="front"`.
+  The other two working resolutions inherit it and are wrong by the difference in the camera's encode buffer: see [Latency](#8-latency-and-the-image_transfer_time_offset_ms-constant).
+- **`resolution` is always the full dual-fisheye frame size.**
+  `lens` selects half of it at read time, so `front` at `3840x1920` returns 1920x1920.
+
 ## 1. Get the SDK
 
 The CameraSDK is proprietary and not redistributable, so it is not vendored in this repo.
@@ -123,19 +148,10 @@ Only one SDK session may hold a camera at a time, so stop any ROS2 Insta360 driv
 
 ## 6. Stream resolutions and lenses
 
-`Insta360Camera(resolution=...)` accepts exactly three values.
-Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_insta360_resolutions.py`.
+[Supported configurations](#supported-configurations) at the top of this page is the quick reference.
+This section is why it looks like that.
 
-| `resolution` | Streams at | `image_transfer_time_offset_ms` |
-|---|---|---|
-| `1920x960` (default) | 1920x960 | **86**, QR-measured |
-| `2560x1280` | 2560x1280 | |
-| `3840x1920` | 3840x1920 | |
-
-A blank offset means never measured, not zero.
-Those two resolutions currently inherit the 1920x960 default, which is wrong for them; see [Latency](#8-latency-and-the-image_transfer_time_offset_ms-constant).
-
-Anything else raises `ValueError`.
+`Insta360Camera(resolution=...)` accepts `1920x960`, `2560x1280` or `3840x1920`, and raises `ValueError` on anything else.
 The SDK's `VideoResolution` enum offers more, and the shim used to map six of them, but only these three stream on an X5.
 
 **The other three failed in ways the camera does not report.**
@@ -158,14 +174,10 @@ Name it explicitly if you want to re-confirm it, and expect to walk to the camer
 
 **Resolutions are always the full dual-fisheye frame size.**
 `lens` selects half of it at read time, so `lens="front"` at `3840x1920` returns 1920x1920.
+`full` returns the whole frame, `front` the right half and `back` the left half.
 
-| `lens` | Returns | Verified |
-|---|---|---|
-| `full` | the whole dual-fisheye frame | yes |
-| `front` | right half | yes, matches the full frame's right half |
-| `back` | left half | yes, matches the full frame's left half |
-
-All three work at all three resolutions.
+The halves were checked against the frame they came from, not just for the right shape: a `front` crop matches the full frame's right half to within inter-frame noise (0.41 mean absolute difference) while differing from the left half by 60.24, and `back` mirrors that.
+All three lenses work at all three streaming resolutions.
 
 ## 7. Multiple cameras
 
