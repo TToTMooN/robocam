@@ -59,7 +59,7 @@ class Args:
     lens: str = "front"
     """Which lens to show: full, front, or back."""
     resolution: str = "1920x960"
-    """Stream resolution (X5 honors this only with --live-view-mode)."""
+    """Stream resolution: 1920x960, 2560x1280 or 3840x1920 (X5 honors these only with --live-view-mode)."""
     live_view_mode: bool = True
     """Use the SDK live-view flow, which unlocks the X5 preview resolution."""
     fps: int = 30

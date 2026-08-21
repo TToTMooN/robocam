@@ -57,14 +57,31 @@ int64_t NowRealtimeNs() {
     return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
 }
 
+// Only what an X5 actually streams, verified against hardware 2026-08-21.
+// Three entries were removed after testing all six the SDK enum offers:
+//
+//   RES_1440_720P30    Rejected as a main stream. The camera does not report
+//   RES_1152_1152P30   this - it silently keeps its previous live-stream
+//                      resolution, which persists across processes and power
+//                      cycles, so the delivered size depends on session order.
+//                      RES_1440_720P30 remains valid as an LRV resolution (see
+//                      the hardcoded lrv_video_resulution below).
+//
+//                      Note this differs from the unknown-string path below,
+//                      which requests RES_1920_960P30 and genuinely gets it.
+//   RES_2880_2880P30   StartLiveStreaming rejects it, but only after
+//                      SetVideoCaptureParams has already committed it. That
+//                      write drops the camera out of Android USB mode and
+//                      rewrites its normal-video resolution; recovery needs
+//                      the on-camera settings menu, not a replug.
+//
+// The Python driver rejects unsupported strings before they reach here, so a
+// stale .so built before this change still cannot request them.
 const std::map<std::string, ins_camera::VideoResolution>& ResolutionMap() {
     static const std::map<std::string, ins_camera::VideoResolution> kMap = {
         {"3840x1920", ins_camera::VideoResolution::RES_3840_1920P30},
-        {"2880x2880", ins_camera::VideoResolution::RES_2880_2880P30},
         {"2560x1280", ins_camera::VideoResolution::RES_2560_1280P30},
-        {"2304x1152", ins_camera::VideoResolution::RES_1152_1152P30},
         {"1920x960",  ins_camera::VideoResolution::RES_1920_960P30},
-        {"1440x720",  ins_camera::VideoResolution::RES_1440_720P30},
     };
     return kMap;
 }
