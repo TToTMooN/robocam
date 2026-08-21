@@ -75,6 +75,12 @@ int64_t NowRealtimeNs() {
 //                      rewrites its normal-video resolution; recovery needs
 //                      the on-camera settings menu, not a replug.
 //
+// 1920x960 is a hard floor. Every smaller 2:1 entry the enum offers was mapped
+// and tested - RES_1024_512P30, RES_960_480P30, RES_720_360P30, RES_640_320P30,
+// RES_480_240P30 and RES_1440_720P30 - and all six are rejected the same silent
+// way. Do not re-add them hoping for a cheaper stream; crop or downscale in the
+// consumer instead.
+//
 // The Python driver rejects unsupported strings before they reach here, so a
 // stale .so built before this change still cannot request them.
 const std::map<std::string, ins_camera::VideoResolution>& ResolutionMap() {

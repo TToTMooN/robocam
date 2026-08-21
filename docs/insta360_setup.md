@@ -21,6 +21,8 @@ Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_ins
 
 Reading this table:
 
+- **`1920x960` is the smallest resolution that streams.**
+  The SDK enum offers five smaller 2:1 sizes down to 480x240; all were tested and all are rejected, so they are not listed here.
 - **N across a whole row means the resolution never streams**, not that the lens is unavailable.
   The driver raises `ValueError` on those three.
   Both failure modes are silent on the camera's side and worth knowing before you hit one: see [Stream resolutions and lenses](#6-stream-resolutions-and-lenses).
@@ -154,8 +156,14 @@ This section is why it looks like that.
 `Insta360Camera(resolution=...)` accepts `1920x960`, `2560x1280` or `3840x1920`, and raises `ValueError` on anything else.
 The SDK's `VideoResolution` enum offers more, and the shim used to map six of them, but only these three stream on an X5.
 
-**The other three failed in ways the camera does not report.**
-`1440x720` and `2304x1152` are rejected as a main stream, and instead of failing the camera silently keeps whatever it streamed last.
+**1920x960 is a hard floor.**
+The SDK's enum carries five smaller 2:1 dual-fisheye resolutions - 1024x512, 960x480, 720x360, 640x320 and 480x240 - and none of them stream on an X5.
+All five were mapped and tested on 2026-08-21, and all five are rejected exactly the way `1440x720` is, so there is no cheaper stream to be had below the default.
+Crop or downscale in the consumer instead.
+None of them reset the camera, unlike `2880x2880`.
+
+**The rejected resolutions fail in ways the camera does not report.**
+`1440x720`, `2304x1152` and every sub-1920x960 candidate are rejected as a main stream, and instead of failing the camera silently keeps whatever it streamed last.
 That previous resolution persists across processes and power cycles, so the size you get depends on which session ran before: with the camera last at 1920x960 a `1440x720` request delivers 1920x960, and last at 2560x1280 the same request delivers 2560x1280.
 
 `2880x2880` is worse.
