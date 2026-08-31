@@ -125,6 +125,18 @@ def _load_native() -> ctypes.CDLL:
     lib.ins_decode_errors.argtypes = [ctypes.c_void_p]
     lib.ins_close.restype = None
     lib.ins_close.argtypes = [ctypes.c_void_p]
+    try:
+        lib.ins_sdk_version.restype = ctypes.c_char_p
+        lib.ins_sdk_version.argtypes = []
+    except AttributeError as exc:
+        # A stale .so is the common case: _native/ is gitignored and built per
+        # environment, so it survives checkouts of newer driver code. Degrading
+        # silently would mean silently running the CameraSDK this symbol exists
+        # to identify, so fail with the fix instead.
+        raise RuntimeError(
+            f"{_NATIVE} predates ins_sdk_version (CameraSDK 2.1.8 or newer "
+            f"required). Rebuild it: bash native/build.sh"
+        ) from exc
     return lib
 
 
@@ -151,7 +163,8 @@ class Insta360Camera:
     bitrate : int
         Encoder bitrate in bits/s.
     live_view_mode : bool
-        SDK 2.1.1 live-view flow; unlocks the X5 preview resolution.
+        SDK live-view flow; unlocks the X5 preview resolution (found on
+        SDK 2.1.1, re-verified on 2.1.8).
     lens : str
         Which lens to return: ``full``, ``front`` (right half), or ``back``.
     image_transfer_time_offset_ms : float
@@ -185,6 +198,7 @@ class Insta360Camera:
     _handle: Optional[ctypes.c_void_p] = field(init=False, repr=False, default=None)
     _buf: Optional[np.ndarray] = field(init=False, repr=False, default=None)
     _actual_resolution: Optional[str] = field(init=False, repr=False, default=None)
+    _sdk_version: Optional[str] = field(init=False, repr=False, default=None)
 
     def __repr__(self) -> str:
         id_str = self.serial or "first-discovered"
@@ -201,6 +215,7 @@ class Insta360Camera:
                 f"different resolution than the one recorded."
             )
         self._lib = _load_native()
+        self._sdk_version = self._lib.ins_sdk_version().decode()
         err = ctypes.create_string_buffer(256)
         handle = self._lib.ins_open(
             self.serial.encode(),
@@ -214,7 +229,12 @@ class Insta360Camera:
         if not handle:
             raise RuntimeError(f"insta_source open failed: {err.value.decode()}")
         self._handle = ctypes.c_void_p(handle)
-        logger.info("Opened {} (service_port={})", self, self.service_port or "SDK default")
+        logger.info(
+            "Opened {} (service_port={}, CameraSDK {})",
+            self,
+            self.service_port or "SDK default",
+            self._sdk_version,
+        )
 
     def read(self) -> CameraData:
         """Block until a frame newer than the last returned one arrives."""
@@ -269,6 +289,7 @@ class Insta360Camera:
             "lens": self.lens,
             "live_view_mode": self.live_view_mode,
             "image_transfer_time_offset_ms": self.image_transfer_time_offset_ms,
+            "sdk_version": self._sdk_version,
         }
         if self.name:
             info["name"] = self.name

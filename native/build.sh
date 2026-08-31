@@ -6,7 +6,10 @@
 #   1. The Insta360 CameraSDK (proprietary; apply at insta360.com/sdk/home).
 #      Looked up in $INSTA360_SDK_ROOT, then vendor/insta360_sdk/ at the repo
 #      root. Either location must contain include/camera/, include/stream/ and
-#      lib/libCameraSDK.so.
+#      lib/libCameraSDK.so. Must be CameraSDK 2.1.8 or newer (the shim calls
+#      GetSDKVersion, which older builds do not export - checked below, since
+#      a -shared link would otherwise succeed and die at first call). Note
+#      2.1.8 needs libstdc++ >= 3.4.30 (GCC 12) at runtime.
 #
 #      Both that drop-in and the output below live OUTSIDE robocam/ on purpose:
 #      flit packages the whole module directory and never reads .gitignore, so
@@ -47,6 +50,16 @@ if [ ! -f "$SDK/lib/libCameraSDK.so" ] || [ ! -d "$SDK/include/camera" ]; then
     echo "       Expected \$SDK/lib/libCameraSDK.so and \$SDK/include/{camera,stream}/." >&2
     echo "       Set INSTA360_SDK_ROOT, or drop the SDK in vendor/insta360_sdk/." >&2
     echo "       See 'Insta360 SDK setup' in the robocam README." >&2
+    exit 1
+fi
+
+# Plain grep + /dev/null rather than grep -q: -q exits at the first match,
+# nm takes a SIGPIPE, and pipefail turns that into a bogus failure.
+if ! nm -D --defined-only "$SDK/lib/libCameraSDK.so" | grep GetSDKVersion >/dev/null; then
+    echo "error: the CameraSDK at $SDK is older than 2.1.8" >&2
+    echo "       The shim needs GetSDKVersion, which this build does not export," >&2
+    echo "       and a -shared link would succeed anyway and fail at first call." >&2
+    echo "       Download the current SDK; see 'Insta360 SDK setup' in the README." >&2
     exit 1
 fi
 
