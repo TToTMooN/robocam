@@ -31,5 +31,11 @@ recordings/
 # and never reads .gitignore, so anything under robocam/ lands in the wheel.
 _native/
 
-# Insta360 CameraSDK drop-in (proprietary, never committed) - same reason
-vendor/insta360_sdk/
+# Insta360 CameraSDK drop-in (proprietary, never committed) - same reason.
+# Anchored: repo-root vendor/ only, never the committed robocam/vendor/ package.
+/vendor/insta360_sdk/
+
+# CameraSDK capability cache: the SDK writes jsons/camera_conf_<model>.json
+# (~138 KB) into the process cwd on every Camera::Open(), with no API to
+# redirect it. Harmless; unanchored because diagnostics run from other cwds.
+jsons/

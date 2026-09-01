@@ -23,13 +23,17 @@
 //
 // Build: native/build.sh (links CameraSDK + openh264 + swscale). The Insta360
 // CameraSDK is proprietary and is NOT vendored here; see the README section
-// "Insta360 SDK setup" for how build.sh locates it.
+// "Insta360 SDK setup" for how build.sh locates it. CameraSDK 2.1.8 or newer
+// is required (ins_sdk_version below calls GetSDKVersion, which 2.1.1 does not
+// export; build.sh refuses older trees). 2.1.8 also raised the runtime floor
+// to libstdc++ >= 3.4.30 (GCC 12).
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -242,9 +246,53 @@ void SetErr(char* err, int errlen, const std::string& msg) {
     }
 }
 
+// SDK 2.1.8 defaults to VERBOSE logging on stdout (2.1.1 was quiet), including
+// raw USB endpoint bytes that are not valid UTF-8. Set the level once, before
+// any other SDK entry point - in particular before TheFleet(), whose
+// DeviceDiscovery member is constructed during the magic-static init.
+// INSTA360_SDK_LOG_LEVEL overrides the WARNING default without a rebuild;
+// SetLogPath is no escape hatch (it duplicates the log to a file, it does not
+// redirect stdout).
+void QuietSdkLogging() {
+    [[maybe_unused]] static const bool once = [] {
+        ins_camera::LogLevel level = ins_camera::LogLevel::WARNING;
+        if (const char* env = std::getenv("INSTA360_SDK_LOG_LEVEL")) {
+            const std::string v(env);
+            if (v == "verbose")      level = ins_camera::LogLevel::VERBOSE;
+            else if (v == "info")    level = ins_camera::LogLevel::INFO;
+            else if (v == "warning") level = ins_camera::LogLevel::WARNING;
+            else if (v == "error")   level = ins_camera::LogLevel::ERR;
+            else if (v == "fatal")   level = ins_camera::LogLevel::FATAL;
+            else {
+                fprintf(stderr,
+                        "insta_source: ignoring INSTA360_SDK_LOG_LEVEL=%s "
+                        "(want verbose|info|warning|error|fatal)\n",
+                        env);
+            }
+        }
+        ins_camera::SetLogLevel(level);
+        return true;
+    }();
+}
+
 } // namespace
 
 extern "C" {
+
+// The linked CameraSDK's own version string (e.g. "2.1.8"). Needs no camera
+// and no handle, so it is the cheapest confirmation of which SDK build this
+// shim is actually bound to - the SDK ships no other version marker anywhere.
+const char* ins_sdk_version() {
+    QuietSdkLogging();
+    static const std::string v = [] {
+        try {
+            return ins_camera::GetSDKVersion();
+        } catch (...) {
+            return std::string("unknown");
+        }
+    }();
+    return v.c_str();
+}
 
 // Open the camera and start streaming. Returns an opaque handle or nullptr
 // (with `err` filled). serial="" selects the first discovered camera.
@@ -273,6 +321,7 @@ Fleet& TheFleet() {
 
 static void* ins_open_impl(const char* serial, const char* resolution, int bitrate,
                            int live_view_mode, int service_port, char* err, int errlen) {
+    QuietSdkLogging();  // must precede TheFleet(): DeviceDiscovery is SDK call #1
     Fleet& fleet = TheFleet();
     // Held across Open()+StartLiveStreaming: serializes multi-camera bring-up.
     std::lock_guard<std::mutex> fleet_lock(fleet.mu);
@@ -329,8 +378,9 @@ static void* ins_open_impl(const char* serial, const char* resolution, int bitra
         (it != map.end()) ? it->second : ins_camera::VideoResolution::RES_1920_960P30;
 
     if (live_view_mode) {
-        // SDK 2.1.1 live-view flow; makes the X5 honor the requested preview
-        // resolution (verified; officially "fixed"). Non-fatal on failure.
+        // Live-view flow: makes the X5 honor the requested preview resolution
+        // (officially "fixed"; found on SDK 2.1.1, re-verified on 2.1.8).
+        // Non-fatal on failure.
         if (handle->cam->SetVideoSubMode(ins_camera::SubVideoMode::VIDEO_LIVEVIEW)) {
             ins_camera::RecordParams rp;
             rp.resolution = res;

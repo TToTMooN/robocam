@@ -140,7 +140,7 @@ Measure rates yourself with `rostopic hz` inside the container, or with the rece
 
 **Full instructions, troubleshooting and known dead ends: [docs/insta360_setup.md](docs/insta360_setup.md).** The short version:
 
-1. Apply for the CameraSDK at [insta360.com/sdk/home](https://www.insta360.com/sdk/home) (needs a build posted after 2025-04-23) and lay it out as `include/camera/`, `include/stream/`, `lib/libCameraSDK.so`.
+1. Apply for the CameraSDK at [insta360.com/sdk/home](https://www.insta360.com/sdk/home) (needs **2.1.8 or newer** - the shim calls `GetSDKVersion`, and `build.sh` refuses older trees; note 2.1.8 needs a GCC 12+ libstdc++ at runtime) and lay it out as `include/camera/`, `include/stream/`, `lib/libCameraSDK.so`.
 2. On the camera: **dual-lens mode**, **USB Mode = Android** (not U-Disk, which is the mass-storage default), **Auto Power Off = Never** (USB does not suppress the sleep timer).
 3. Install the udev rules for USB permissions and autosuspend.
 4. Build the shim from inside the environment you will run in:

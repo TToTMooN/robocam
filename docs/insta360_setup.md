@@ -8,7 +8,7 @@ The [Troubleshooting](#troubleshooting) and [Dead ends](#dead-ends) sections are
 
 ## Supported configurations
 
-Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_insta360_resolutions.py`.
+Verified against an Insta360 X5 on 2026-08-21 with `scripts/diagnostics/test_insta360_resolutions.py`, and re-verified unchanged on CameraSDK 2.1.8 on 2026-08-31 (the `VideoResolution` enum values are byte-identical between 2.1.1 and 2.1.8, so the matrix carries over).
 
 | `resolution` | `lens="full"` | `lens="front"` | `lens="back"` | `image_transfer_time_offset_ms` |
 |---|:---:|:---:|:---:|---|
@@ -36,15 +36,24 @@ Reading this table:
 ## 1. Get the SDK
 
 The CameraSDK is proprietary and not redistributable, so it is not vendored in this repo.
-Apply for access at [insta360.com/sdk/home](https://www.insta360.com/sdk/home) and download **CameraSDK 2.1.1 for Linux**.
+Apply for access at [insta360.com/sdk/home](https://www.insta360.com/sdk/home) and download **CameraSDK 2.1.8 for Linux** (or newer; the 2026-08 bundle is `Linux_CameraSDK-2.1.8_MediaSDK-3.1.5.zip`).
 
-It must be a build posted after **2025-04-23**; earlier builds do not work with current firmware.
+**2.1.8 is a hard floor**, not a recommendation: the shim calls `GetSDKVersion()`, which older builds do not export, and `build.sh` refuses an older tree up front (a `-shared` link would otherwise succeed and die at first call).
+This subsumes the old "posted after 2025-04-23" firmware rule.
 
-The download bundles several platform tarballs.
-For an x86_64 desktop you want `CameraSDK-2.1.1-Linux.tar.gz`.
-The `libMediaSDK-dev-*.tar.xz` in the same bundle is Insta360's offline stitching SDK and is unrelated to this driver.
+2.1.8 also raised the runtime floor to **libstdc++ >= 3.4.30 (GCC 12)**; 2.1.1 only needed 3.4.22.
+Check a candidate environment with:
 
-Lay the extracted tree out like this, anywhere on disk:
+```bash
+strings $PREFIX/lib/libstdc++.so.6 | grep -c GLIBCXX_3.4.30   # want >= 1
+```
+
+The zip bundles several tarballs.
+For an x86_64 desktop you want `CameraSDK-2.1.8-<stamp>-linux-x86_64.tar_<digits>.gz` - the mangled `.tar_<epoch-ms>.gz` suffix comes from the vendor's download service and `tar -xzf` handles it as-is.
+Three aarch64 cross-toolchain variants (gcc-arm, linaro, jetson) exist for embedded targets.
+`MediaSDK-3.1.5-*` (~2 GB, offline stitching) and `InsMetaDataSDK-*` (recorded-file trailer parsing: IMU, exposure, serial) are in the same zip and are unrelated to this driver.
+
+Lay the extracted tree out like this, anywhere on disk (`bin/` and `example/` are not needed):
 
 ```
 <sdk-root>/
@@ -54,14 +63,16 @@ Lay the extracted tree out like this, anywhere on disk:
 ```
 
 ```bash
-tar -xzf CameraSDK-2.1.1-Linux.tar.gz -C /tmp
-SDK=$(echo /tmp/CameraSDK-*-Linux)
+unzip Linux_CameraSDK-2.1.8_MediaSDK-3.1.5.zip
+tar -xzf Linux_CameraSDK-2.1.8_MediaSDK-3.1.5/CameraSDK-2.1.8-*-linux-x86_64.tar_*.gz -C /tmp
+SDK=$(echo /tmp/CameraSDK-*-linux-x86_64)
 mkdir -p ~/insta360_sdk/include ~/insta360_sdk/lib
 cp -r "$SDK/include/camera" "$SDK/include/stream" ~/insta360_sdk/include/
 cp    "$SDK/lib/libCameraSDK.so"                   ~/insta360_sdk/lib/
 ```
 
 You can also drop that tree into `vendor/insta360_sdk/` at this repo's root, which is gitignored and is the default location the build script checks.
+That is the repo root - not `robocam/vendor/`, which is a different, committed Python package.
 
 > **Why it is not under `robocam/`.**
 > flit packages the entire `robocam/` module directory and never consults `.gitignore`, so anything placed there would be baked into a wheel.
@@ -137,6 +148,16 @@ uv run scripts/view_insta360.py
 ```
 
 You should see roughly **29.5 fps** and a stamp lag around **131 ms** in the overlay.
+The lag reading needs ~90 frames to settle: the device-to-host clock anchor is a running minimum, so the first seconds read tens of ms high.
+
+Two SDK behaviors are normal and expected here:
+
+- **stdout stays quiet** because the shim sets the SDK log level once at open (2.1.8 defaults to a VERBOSE flood that includes raw, non-UTF-8 USB bytes; 2.1.1 was quiet).
+  A couple of one-per-open `W camera_impl.cpp` warnings still appear - that is the WARNING filter working, not failing.
+  Set `INSTA360_SDK_LOG_LEVEL=verbose|info|warning|error|fatal` to override without a rebuild.
+  `SetLogPath` is no alternative: it duplicates the log to a file rather than redirecting stdout.
+- **A `jsons/camera_conf_<model>.json` cache (~138 KB)** appears in whatever directory you ran from - the SDK writes it on every `Open()`, with no API to redirect it.
+  It is harmless and gitignored; in a read-only working directory the SDK logs the failure and carries on.
 
 Then confirm colour is right: point the camera at something unambiguously **red** and check it renders red.
 The native shim decodes directly to RGB24 so the driver can hand robocam its `images={"rgb": ...}` without a `cvtColor` on the critical path.
@@ -165,6 +186,10 @@ The official [Desktop-CameraSDK-Cpp](https://github.com/Insta360Develop/Desktop-
 The same guide explains the floor: "the SDK only supports preset resolutions, frame rates, and interval times available on the camera screen."
 The three that work are X5 screen presets.
 The `VideoResolution` enum is a flat list across every Insta360 model with no per-model annotation, so it is not a capability list for any one camera, and the only way to know what an X5 accepts is to ask an X5.
+
+**The 2.1.8 capability API does not change this.**
+2.1.8 added `GetSupportedVideoResolutions(mode)` and friends, backed by a per-camera capability table fetched at `Open()` (the `jsons/` cache).
+It works for record modes (20 entries on an X5) but returns **empty for `FUNCTION_MODE_LIVE_STREAM`** - the preview mode this driver uses is "unmapped" - so it cannot replace the hand-verified matrix above, and the shim's three-entry map remains authoritative.
 
 **1920x960 is a hard floor.**
 The SDK's enum carries five smaller 2:1 dual-fisheye resolutions - 1024x512, 960x480, 720x360, 640x320 and 480x240 - and none of them stream on an X5.
@@ -262,6 +287,9 @@ A fresh anchor is taken at every open.
 | Random drops, `dmesg` shows `-71`/`EPROTO` or disconnects | USB transport or power. Insta360 SDK issue #92 attributes this to insufficient supply; try a different port or cable, and avoid unpowered hubs. |
 | Second camera aborts with `bind: Address already in use` | Two processes cannot share the camera fleet. Use one process with distinct `service_port` values. |
 | Hundreds of decode errors per minute | Both cameras behind one shared USB hub. Move each to its own root port. |
+| `GLIBCXX_3.4.30 not found` at import | CameraSDK 2.1.8 needs a GCC 12+ libstdc++ (`.so.6.0.30`). Use a newer environment, or check the env with the one-liner in [1. Get the SDK](#1-get-the-sdk). |
+| `symbol lookup error: ... GetSDKVersion` | An older CameraSDK is being resolved ahead of the vendored one - `LD_LIBRARY_PATH` outranks the shim's RUNPATH. Check `ldd _native/libinsta_source.so`. |
+| A `jsons/` directory appears wherever I run from | The SDK's per-open capability cache. Harmless and gitignored; see [5. First run](#5-first-run). |
 
 Note that the driver has no auto-reconnect: when SDK callbacks stop for any reason, `read()` raises `TimeoutError` and the stream does not recover on its own.
 Any drop is therefore permanent until the process is restarted.
