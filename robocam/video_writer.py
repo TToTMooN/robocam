@@ -21,10 +21,25 @@ from loguru import logger
 _SENTINEL = None  # signals the writer thread to stop
 
 
+# Probe frame size, comfortably above NVENC's minimum encode dimensions (~129x33 for HEVC).
+_NVENC_PROBE_SIZE = 256
+# Bound for the probe encode, which blocks its caller: on a cold host the first CUDA context creation loads and
+# initializes the driver/GPU, which can take several seconds without nvidia-persistenced. A healthy probe finishes
+# well under a second once warm; a slow or stuck init falls back to libx264. (An ffmpeg wedged in an
+# uninterruptible driver call cannot be killed, so subprocess.run can still block on it past the timeout.)
+_NVENC_PROBE_TIMEOUT_S = 10.0
+
+
 def _check_nvenc_available() -> bool:
-    """Probe whether the system has a working hevc_nvenc encoder."""
+    """Probe whether the system has a working hevc_nvenc encoder.
+
+    ``ffmpeg -encoders`` only lists encoders compiled into ffmpeg, not whether a usable NVIDIA GPU/driver
+    exists, so after that cheap pre-check we run a real one-frame encode that mirrors the writer pipeline
+    (rawvideo rgb24 on stdin -> hevc_nvenc -> yuv420p) into the null muxer. Never raises.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
+        logger.debug("NVENC unavailable: ffmpeg not found on PATH")
         return False
     try:
         result = subprocess.run(
@@ -32,22 +47,87 @@ def _check_nvenc_available() -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
-        return "hevc_nvenc" in result.stdout
-    except Exception:
+        if "hevc_nvenc" not in result.stdout:
+            logger.debug("NVENC unavailable: hevc_nvenc not compiled into {}", ffmpeg)
+            return False
+        size = _NVENC_PROBE_SIZE
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-s",
+                f"{size}x{size}",
+                "-pix_fmt",
+                "rgb24",
+                "-r",
+                "30",
+                "-i",
+                "-",  # stdin
+                "-an",
+                "-vcodec",
+                "hevc_nvenc",
+                "-pix_fmt",
+                "yuv420p",
+                # Same NVENC options as _build_ffmpeg_cmd, so an ffmpeg that rejects them is rejected here too
+                "-preset",
+                "p4",
+                "-rc",
+                "constqp",
+                "-qp",
+                "23",
+                "-f",
+                "null",
+                "-",
+            ],
+            input=bytes(size * size * 3),
+            capture_output=True,
+            timeout=_NVENC_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if result.returncode != 0:
+            # The first error line carries the root cause (e.g. "Cannot load libcuda.so.1")
+            stderr = " | ".join(ln.strip() for ln in result.stderr.decode(errors="replace").splitlines() if ln.strip())
+            logger.info(
+                "NVENC unavailable: hevc_nvenc test encode failed (exit {}): {}",
+                result.returncode,
+                stderr[:500] or "<no stderr>",
+            )
+            return False
+        return True
+    except subprocess.TimeoutExpired as e:
+        step = "ffmpeg -encoders" if "-encoders" in e.cmd else "hevc_nvenc test encode"
+        logger.info("NVENC unavailable: {} timed out after {}s", step, e.timeout)
+        return False
+    except Exception as e:
+        logger.info("NVENC unavailable: ffmpeg probe failed: {!r}", e)
         return False
 
 
-# Cache the probe result per-process
+# Cache the probe result per-process; the lock makes concurrent first callers wait for one probe
 _NVENC_AVAILABLE: Optional[bool] = None
+_NVENC_LOCK = threading.Lock()
 
 
 def nvenc_available() -> bool:
-    """Return True if hevc_nvenc is available (cached after first call)."""
+    """Return True if hevc_nvenc can actually encode on this host (cached after first call).
+
+    The first call blocks while the probe encode runs (CUDA/NVENC init on GPU hosts, up to
+    ``_NVENC_PROBE_TIMEOUT_S``). Call it once during setup (or from a background thread) to keep that off
+    latency-sensitive threads.
+    """
     global _NVENC_AVAILABLE
-    if _NVENC_AVAILABLE is None:
-        _NVENC_AVAILABLE = _check_nvenc_available()
-    return _NVENC_AVAILABLE
+    with _NVENC_LOCK:
+        if _NVENC_AVAILABLE is None:
+            _NVENC_AVAILABLE = _check_nvenc_available()
+        return _NVENC_AVAILABLE
 
 
 @dataclass
@@ -67,6 +147,8 @@ class AsyncVideoWriter:
     codec : str
         Preferred codec. ``"auto"`` selects ``hevc_nvenc`` if available, else ``libx264``.
         Other valid values: ``"hevc_nvenc"``, ``"h264_nvenc"``, ``"libx264"``, ``"libx265"``.
+        With ``"auto"``, the first ``start()`` in a process blocks until the NVENC probe finishes;
+        call :func:`nvenc_available` during setup to run it ahead of time.
     pixel_format : str
         Output pixel format (default ``yuv420p`` for wide compatibility).
     crf : int
