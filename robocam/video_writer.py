@@ -7,13 +7,15 @@ software encoding when NVENC is unavailable.
 
 from __future__ import annotations
 
+import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import numpy as np
 from loguru import logger
@@ -116,6 +118,16 @@ _NVENC_AVAILABLE: Optional[bool] = None
 _NVENC_LOCK = threading.Lock()
 
 
+def _reset_nvenc_lock_after_fork() -> None:
+    # A child forked while another thread is probing would inherit a held lock with no owner. The cache stays as
+    # is: still None if the fork landed mid-probe, so the child runs its own probe.
+    global _NVENC_LOCK
+    _NVENC_LOCK = threading.Lock()
+
+
+os.register_at_fork(after_in_child=_reset_nvenc_lock_after_fork)
+
+
 def nvenc_available() -> bool:
     """Return True if hevc_nvenc can actually encode on this host (cached after first call).
 
@@ -175,6 +187,7 @@ class AsyncVideoWriter:
     queue_size: int = 300
 
     _proc: Optional[subprocess.Popen] = field(init=False, repr=False, default=None)
+    _stderr_file: Optional[IO[bytes]] = field(init=False, repr=False, default=None)
     _thread: Optional[threading.Thread] = field(init=False, repr=False, default=None)
     _queue: queue.Queue = field(init=False, repr=False)
     _frame_count: int = field(init=False, repr=False, default=0)
@@ -192,6 +205,11 @@ class AsyncVideoWriter:
     def _build_ffmpeg_cmd(self, codec: str) -> list[str]:
         cmd = [
             "ffmpeg",
+            # No banner or periodic progress lines: only warnings and errors reach the stderr log
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "warning",
             "-y",
             "-f",
             "rawvideo",
@@ -230,12 +248,20 @@ class AsyncVideoWriter:
         cmd = self._build_ffmpeg_cmd(codec)
         logger.info("AsyncVideoWriter: {} (codec={})", self.path, codec)
 
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        # stderr goes to a temp file, not a pipe: nothing reads it until stop(), and a full pipe would block ffmpeg,
+        # then the writer thread, then write() on the caller's thread
+        self._stderr_file = tempfile.TemporaryFile()
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr_file,
+            )
+        except BaseException:
+            self._stderr_file.close()
+            self._stderr_file = None
+            raise
         self._thread = threading.Thread(
             target=self._writer_loop, daemon=True, name=f"video-writer-{Path(self.path).stem}"
         )
@@ -289,7 +315,7 @@ class AsyncVideoWriter:
 
         if self._proc is not None:
             self._proc.wait(timeout=30)
-            stderr = self._proc.stderr.read().decode() if self._proc.stderr else ""
+            stderr = self._read_stderr()
             if self._proc.returncode != 0:
                 logger.warning(
                     "ffmpeg exited with code {}: {}", self._proc.returncode, stderr[-500:] if stderr else ""
@@ -297,6 +323,17 @@ class AsyncVideoWriter:
 
         self._started = False
         logger.info("AsyncVideoWriter finished: {} ({} frames)", self.path, self._frame_count)
+
+    def _read_stderr(self) -> str:
+        """Return what ffmpeg wrote to stderr and close the temp file."""
+        if self._stderr_file is None:
+            return ""
+        try:
+            self._stderr_file.seek(0)
+            return self._stderr_file.read().decode(errors="replace")
+        finally:
+            self._stderr_file.close()
+            self._stderr_file = None
 
     @property
     def frame_count(self) -> int:
