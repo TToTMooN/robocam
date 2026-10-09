@@ -7,13 +7,15 @@ software encoding when NVENC is unavailable.
 
 from __future__ import annotations
 
+import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import numpy as np
 from loguru import logger
@@ -21,10 +23,25 @@ from loguru import logger
 _SENTINEL = None  # signals the writer thread to stop
 
 
+# Probe frame size, comfortably above NVENC's minimum encode dimensions (~129x33 for HEVC).
+_NVENC_PROBE_SIZE = 256
+# Bound for the probe encode, which blocks its caller: on a cold host the first CUDA context creation loads and
+# initializes the driver/GPU, which can take several seconds without nvidia-persistenced. A healthy probe finishes
+# well under a second once warm; a slow or stuck init falls back to libx264. (An ffmpeg wedged in an
+# uninterruptible driver call cannot be killed, so subprocess.run can still block on it past the timeout.)
+_NVENC_PROBE_TIMEOUT_S = 10.0
+
+
 def _check_nvenc_available() -> bool:
-    """Probe whether the system has a working hevc_nvenc encoder."""
+    """Probe whether the system has a working hevc_nvenc encoder.
+
+    ``ffmpeg -encoders`` only lists encoders compiled into ffmpeg, not whether a usable NVIDIA GPU/driver
+    exists, so after that cheap pre-check we run a real one-frame encode that mirrors the writer pipeline
+    (rawvideo rgb24 on stdin -> hevc_nvenc -> yuv420p) into the null muxer. Never raises.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
+        logger.debug("NVENC unavailable: ffmpeg not found on PATH")
         return False
     try:
         result = subprocess.run(
@@ -32,22 +49,98 @@ def _check_nvenc_available() -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
-        return "hevc_nvenc" in result.stdout
-    except Exception:
+        if "hevc_nvenc" not in result.stdout:
+            logger.debug("NVENC unavailable: hevc_nvenc not compiled into {}", ffmpeg)
+            return False
+        size = _NVENC_PROBE_SIZE
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-s",
+                f"{size}x{size}",
+                "-pix_fmt",
+                "rgb24",
+                "-r",
+                "30",
+                "-i",
+                "-",  # stdin
+                "-an",
+                "-vcodec",
+                "hevc_nvenc",
+                "-pix_fmt",
+                "yuv420p",
+                # Same NVENC options as _build_ffmpeg_cmd, so an ffmpeg that rejects them is rejected here too
+                "-preset",
+                "p4",
+                "-rc",
+                "constqp",
+                "-qp",
+                "23",
+                "-f",
+                "null",
+                "-",
+            ],
+            input=bytes(size * size * 3),
+            capture_output=True,
+            timeout=_NVENC_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if result.returncode != 0:
+            # The first error line carries the root cause (e.g. "Cannot load libcuda.so.1")
+            stderr = " | ".join(ln.strip() for ln in result.stderr.decode(errors="replace").splitlines() if ln.strip())
+            logger.info(
+                "NVENC unavailable: hevc_nvenc test encode failed (exit {}): {}",
+                result.returncode,
+                stderr[:500] or "<no stderr>",
+            )
+            return False
+        return True
+    except subprocess.TimeoutExpired as e:
+        step = "ffmpeg -encoders" if "-encoders" in e.cmd else "hevc_nvenc test encode"
+        logger.info("NVENC unavailable: {} timed out after {}s", step, e.timeout)
+        return False
+    except Exception as e:
+        logger.info("NVENC unavailable: ffmpeg probe failed: {!r}", e)
         return False
 
 
-# Cache the probe result per-process
+# Cache the probe result per-process; the lock makes concurrent first callers wait for one probe
 _NVENC_AVAILABLE: Optional[bool] = None
+_NVENC_LOCK = threading.Lock()
+
+
+def _reset_nvenc_lock_after_fork() -> None:
+    # A child forked while another thread is probing would inherit a held lock with no owner. The cache stays as
+    # is: still None if the fork landed mid-probe, so the child runs its own probe.
+    global _NVENC_LOCK
+    _NVENC_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX only
+    os.register_at_fork(after_in_child=_reset_nvenc_lock_after_fork)
 
 
 def nvenc_available() -> bool:
-    """Return True if hevc_nvenc is available (cached after first call)."""
+    """Return True if hevc_nvenc can actually encode on this host (cached after first call).
+
+    The first call blocks while the probe encode runs (CUDA/NVENC init on GPU hosts, up to
+    ``_NVENC_PROBE_TIMEOUT_S``). Call it once during setup (or from a background thread) to keep that off
+    latency-sensitive threads.
+    """
     global _NVENC_AVAILABLE
-    if _NVENC_AVAILABLE is None:
-        _NVENC_AVAILABLE = _check_nvenc_available()
-    return _NVENC_AVAILABLE
+    with _NVENC_LOCK:
+        if _NVENC_AVAILABLE is None:
+            _NVENC_AVAILABLE = _check_nvenc_available()
+        return _NVENC_AVAILABLE
 
 
 @dataclass
@@ -67,6 +160,8 @@ class AsyncVideoWriter:
     codec : str
         Preferred codec. ``"auto"`` selects ``hevc_nvenc`` if available, else ``libx264``.
         Other valid values: ``"hevc_nvenc"``, ``"h264_nvenc"``, ``"libx264"``, ``"libx265"``.
+        With ``"auto"``, the first ``start()`` in a process blocks until the NVENC probe finishes;
+        call :func:`nvenc_available` during setup to run it ahead of time.
     pixel_format : str
         Output pixel format (default ``yuv420p`` for wide compatibility).
     crf : int
@@ -93,6 +188,7 @@ class AsyncVideoWriter:
     queue_size: int = 300
 
     _proc: Optional[subprocess.Popen] = field(init=False, repr=False, default=None)
+    _stderr_file: Optional[IO[bytes]] = field(init=False, repr=False, default=None)
     _thread: Optional[threading.Thread] = field(init=False, repr=False, default=None)
     _queue: queue.Queue = field(init=False, repr=False)
     _frame_count: int = field(init=False, repr=False, default=0)
@@ -110,6 +206,12 @@ class AsyncVideoWriter:
     def _build_ffmpeg_cmd(self, codec: str) -> list[str]:
         cmd = [
             "ffmpeg",
+            # No banner or periodic progress lines: only warnings and errors reach the stderr file, which stop()
+            # logs when ffmpeg fails
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "warning",
             "-y",
             "-f",
             "rawvideo",
@@ -148,12 +250,20 @@ class AsyncVideoWriter:
         cmd = self._build_ffmpeg_cmd(codec)
         logger.info("AsyncVideoWriter: {} (codec={})", self.path, codec)
 
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        # stderr goes to a temp file, not a pipe: nothing reads it until stop(), and a full pipe would block ffmpeg,
+        # then the writer thread, then write() on the caller's thread
+        self._stderr_file = tempfile.TemporaryFile()
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr_file,
+            )
+        except BaseException:
+            self._stderr_file.close()
+            self._stderr_file = None
+            raise
         self._thread = threading.Thread(
             target=self._writer_loop, daemon=True, name=f"video-writer-{Path(self.path).stem}"
         )
@@ -170,8 +280,8 @@ class AsyncVideoWriter:
                     break
                 try:
                     self._proc.stdin.write(item)
-                except BrokenPipeError:
-                    logger.error("ffmpeg pipe broken — encoder may have crashed")
+                except Exception as e:  # BrokenPipeError when ffmpeg exited; any error ends the writer
+                    logger.error("ffmpeg pipe broken — encoder may have crashed ({!r})", e)
                     self._failed = True
                     break
         finally:
@@ -190,10 +300,15 @@ class AsyncVideoWriter:
         """
         if not self._started:
             raise RuntimeError("Call start() before write()")
-        if self._failed:
+        item = frame.tobytes()
+        # Wait for room in short slices: if the encoder dies while the queue is full, nothing drains it again
+        while not self._failed:
+            try:
+                self._queue.put(item, timeout=0.1)
+            except queue.Full:
+                continue
+            self._frame_count += 1
             return
-        self._queue.put(frame.tobytes())
-        self._frame_count += 1
 
     def stop(self) -> None:
         """Flush remaining frames and wait for ffmpeg to finish."""
@@ -207,7 +322,7 @@ class AsyncVideoWriter:
 
         if self._proc is not None:
             self._proc.wait(timeout=30)
-            stderr = self._proc.stderr.read().decode() if self._proc.stderr else ""
+            stderr = self._read_stderr()
             if self._proc.returncode != 0:
                 logger.warning(
                     "ffmpeg exited with code {}: {}", self._proc.returncode, stderr[-500:] if stderr else ""
@@ -215,6 +330,17 @@ class AsyncVideoWriter:
 
         self._started = False
         logger.info("AsyncVideoWriter finished: {} ({} frames)", self.path, self._frame_count)
+
+    def _read_stderr(self) -> str:
+        """Return what ffmpeg wrote to stderr and close the temp file."""
+        if self._stderr_file is None:
+            return ""
+        try:
+            self._stderr_file.seek(0)
+            return self._stderr_file.read().decode(errors="replace")
+        finally:
+            self._stderr_file.close()
+            self._stderr_file = None
 
     @property
     def frame_count(self) -> int:
