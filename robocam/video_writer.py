@@ -125,7 +125,8 @@ def _reset_nvenc_lock_after_fork() -> None:
     _NVENC_LOCK = threading.Lock()
 
 
-os.register_at_fork(after_in_child=_reset_nvenc_lock_after_fork)
+if hasattr(os, "register_at_fork"):  # POSIX only
+    os.register_at_fork(after_in_child=_reset_nvenc_lock_after_fork)
 
 
 def nvenc_available() -> bool:
@@ -205,7 +206,8 @@ class AsyncVideoWriter:
     def _build_ffmpeg_cmd(self, codec: str) -> list[str]:
         cmd = [
             "ffmpeg",
-            # No banner or periodic progress lines: only warnings and errors reach the stderr log
+            # No banner or periodic progress lines: only warnings and errors reach the stderr file, which stop()
+            # logs when ffmpeg fails
             "-hide_banner",
             "-nostats",
             "-loglevel",
@@ -278,8 +280,8 @@ class AsyncVideoWriter:
                     break
                 try:
                     self._proc.stdin.write(item)
-                except BrokenPipeError:
-                    logger.error("ffmpeg pipe broken — encoder may have crashed")
+                except Exception as e:  # BrokenPipeError when ffmpeg exited; any error ends the writer
+                    logger.error("ffmpeg pipe broken — encoder may have crashed ({!r})", e)
                     self._failed = True
                     break
         finally:
@@ -298,10 +300,15 @@ class AsyncVideoWriter:
         """
         if not self._started:
             raise RuntimeError("Call start() before write()")
-        if self._failed:
+        item = frame.tobytes()
+        # Wait for room in short slices: if the encoder dies while the queue is full, nothing drains it again
+        while not self._failed:
+            try:
+                self._queue.put(item, timeout=0.1)
+            except queue.Full:
+                continue
+            self._frame_count += 1
             return
-        self._queue.put(frame.tobytes())
-        self._frame_count += 1
 
     def stop(self) -> None:
         """Flush remaining frames and wait for ffmpeg to finish."""
